@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  header, footer, nav, button, #btn-export-list, #party-popper {
+    display: none !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
