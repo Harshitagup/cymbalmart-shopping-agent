@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, Plus, DollarSign, Store, Tag, Sparkles } from 'lucide-react';
 import { ShoppingItem, ItemCategory } from '../types';
-import { CATEGORY_METADATA, STORE_OPTIONS } from '../data/presets';
+import { CATEGORY_METADATA } from '../data/presets';
 
 interface AddItemModalProps {
   isOpen: boolean;

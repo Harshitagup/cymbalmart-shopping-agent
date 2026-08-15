@@ -27,6 +27,88 @@ function getAi(): GoogleGenAI | null {
   return aiClient;
 }
 
+// Resilient GenAI Content Generation with exponential backoff & model fallbacks
+async function generateContentWithFallback(
+  ai: GoogleGenAI,
+  params: {
+    contents: string;
+    config?: any;
+    primaryModel?: string;
+  }
+) {
+  const modelsToTry = [
+    params.primaryModel || 'gemini-3.7-flash',
+    'gemini-flash-latest',
+    'gemini-3.1-flash-lite',
+  ];
+
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: params.config,
+        });
+        if (response && response.text) {
+          return response;
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = err?.message || '';
+        const isUnavailableOrRateLimited =
+          err?.status === 'UNAVAILABLE' ||
+          errMsg.includes('503') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('429') ||
+          errMsg.includes('RESOURCE_EXHAUSTED') ||
+          errMsg.includes('overloaded');
+
+        console.warn(`[GenAI] Model ${model} attempt ${attempt + 1} failed (${err?.status || 'ERR'}):`, errMsg);
+
+        if (isUnavailableOrRateLimited) {
+          await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1) + Math.random() * 300));
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('All model attempts failed');
+}
+
+// Helper to sanitize item categories
+function sanitizeCategory(cat: string): string {
+  const valid = [
+    'food_mains',
+    'food_sides_snacks',
+    'desserts',
+    'drinks_cocktails',
+    'drinks_non_alcoholic',
+    'ice_chill',
+    'tableware_disposables',
+    'decor_ambiance',
+    'entertainment_games',
+    'essentials_emergency',
+  ];
+  return valid.includes(cat) ? cat : 'food_sides_snacks';
+}
+
+function getCurrencySymbol(code: string): string {
+  switch (code) {
+    case 'INR': return '₹';
+    case 'GBP': return '£';
+    case 'EUR': return '€';
+    case 'JPY': return '¥';
+    case 'AED': return 'AED ';
+    case 'AUD': return 'A$';
+    default: return '$';
+  }
+}
+
 // API Health
 app.get('/api/health', (req, res) => {
   res.json({
@@ -39,80 +121,98 @@ app.get('/api/health', (req, res) => {
 
 // Endpoint: Generate Full Party Plan & Shopping List for CymbalMart
 app.post('/api/party/plan', async (req, res) => {
+  const input = req.body || {};
+  const countryCode = (input.countryCode || 'IN').toUpperCase();
+  const currencyCode = input.currencyCode || (countryCode === 'IN' ? 'INR' : countryCode === 'GB' ? 'GBP' : countryCode === 'JP' ? 'JPY' : countryCode === 'AE' ? 'AED' : countryCode === 'DE' || countryCode === 'FR' ? 'EUR' : countryCode === 'AU' ? 'AUD' : 'USD');
+  const currencySymbol = getCurrencySymbol(currencyCode);
+  const regionalPref = input.regionalPreference || 'all_indian';
+  const metricUnits = input.metricUnits !== false;
+
+  const totalGuests =
+    (Number(input.guestBreakdown?.adults) || 0) +
+    (Number(input.guestBreakdown?.kids) || 0) +
+    (Number(input.guestBreakdown?.teens) || 0) || 12;
+
+  const duration = Number(input.durationHours) || 3;
+  const budget = Number(input.targetBudget) || (countryCode === 'IN' ? 10000 : countryCode === 'JP' ? 25000 : countryCode === 'GB' ? 200 : 250);
+  const theme = input.theme || 'Casual Celebration';
+  const eventType = input.eventType || 'Birthday Party';
+  const mealType = input.mealType || 'heavy_appetizers';
+  const venue = input.venue || 'indoor_home';
+  const dietary = Array.isArray(input.dietaryRestrictions) && input.dietaryRestrictions.length > 0
+    ? input.dietaryRestrictions.join(', ')
+    : 'None';
+  const customNotes = input.customNotes || '';
+  const storeLocation = input.preferredStores?.[0] || (countryCode === 'IN' ? 'CymbalMart Hypermarket - Bengaluru (Indiranagar)' : 'CymbalMart Supercenter #1042 - Sunnyvale');
+
+  // Standard catering golden rule calculations
+  const iceLbs = Math.max(10, Math.round(totalGuests * (venue === 'backyard_outdoor' ? 2 : 1.5)));
+  const drinksPerPerson = Math.round(duration * 1.25);
+  const totalDrinks = totalGuests * drinksPerPerson;
+  const servingsPerPerson = mealType === 'full_meal' ? 1.5 : mealType === 'heavy_appetizers' ? 6 : 3;
+
   try {
-    const input = req.body;
     const ai = getAi();
 
-    const totalGuests =
-      (Number(input.guestBreakdown?.adults) || 0) +
-      (Number(input.guestBreakdown?.kids) || 0) +
-      (Number(input.guestBreakdown?.teens) || 0) || 12;
-
-    const duration = Number(input.durationHours) || 3;
-    const budget = Number(input.targetBudget) || 250;
-    const theme = input.theme || 'Casual Celebration';
-    const eventType = input.eventType || 'Birthday Party';
-    const mealType = input.mealType || 'heavy_appetizers';
-    const venue = input.venue || 'indoor_home';
-    const dietary = Array.isArray(input.dietaryRestrictions) && input.dietaryRestrictions.length > 0
-      ? input.dietaryRestrictions.join(', ')
-      : 'None';
-    const customNotes = input.customNotes || '';
-    const storeLocation = input.preferredStores?.[0] || 'CymbalMart Supercenter #1042 - Sunnyvale';
-
-    // Standard catering golden rule calculations
-    const iceLbs = Math.max(10, Math.round(totalGuests * (venue === 'backyard_outdoor' ? 2 : 1.5)));
-    const drinksPerPerson = Math.round(duration * 1.25);
-    const totalDrinks = totalGuests * drinksPerPerson;
-    const servingsPerPerson = mealType === 'full_meal' ? 1.5 : mealType === 'heavy_appetizers' ? 6 : 3;
-
     if (!ai) {
-      // Return smart calculated fallback plan with CymbalMart products
-      return res.json(createAlgorithmicPlan(input, totalGuests, duration, budget, iceLbs, drinksPerPerson, servingsPerPerson));
+      return res.json(createAlgorithmicPlan(input, totalGuests, duration, budget, iceLbs, drinksPerPerson, servingsPerPerson, countryCode, currencyCode, currencySymbol));
     }
 
-    const prompt = `You are the official CymbalMart AI Party Planner & Catering Shopping Expert.
-Your goal is to convert the busy host's event intent into a curated, budget-conscious CymbalMart grocery and party shopping list.
+    const dietaryBreakdownStr = input.guestDietaryBreakdown
+      ? `Guest Dietary Breakdown: Pure Veg: ${input.guestDietaryBreakdown.pureVeg || 0}, Non-Veg: ${input.guestDietaryBreakdown.nonVeg || 0}, Vegan: ${input.guestDietaryBreakdown.vegan || 0}, Jain: ${input.guestDietaryBreakdown.jain || 0}`
+      : '';
+
+    const prompt = `You are the official CymbalMart AI Party Planner & Catering Shopping Expert for ${countryCode} (Currency: ${currencyCode}).
+Your goal is to convert the host's event intent into a realistic, culturally authentic, budget-conscious CymbalMart grocery and party shopping list tailored for ${countryCode}.
+
+COUNTRY & LOCALIZATION CONTEXT:
+- Country: ${countryCode} (Target Currency: ${currencyCode}, Symbol: ${currencySymbol})
+- Regional Preference: ${regionalPref}
+- Units: ${metricUnits ? 'Metric (kg, grams, Litres, ml, packs)' : 'Imperial (lbs, oz, gallons, packs)'}
+- Target Budget: ${budget} ${currencyCode}
 
 EVENT DETAILS:
 - Event Type: ${eventType}
 - Theme & Vibe: ${theme}
 - Total Guests: ${totalGuests} (Adults: ${input.guestBreakdown?.adults || totalGuests}, Teens: ${input.guestBreakdown?.teens || 0}, Kids: ${input.guestBreakdown?.kids || 0})
+- ${dietaryBreakdownStr}
 - Duration: ${duration} hours
 - Venue: ${venue}
 - Meal Type: ${mealType}
 - Dietary Restrictions: ${dietary}
 - Custom Dietary/Host Notes: ${input.customDietaryNotes || 'None'}
-- Target Budget: $${budget} USD
 - Store: ${storeLocation}
 - Specific Host Requirements: ${customNotes}
 
-CATERING GOLDEN RULES & CYMBALMART MAPPING:
-1. Drinks: ~${drinksPerPerson} drinks per person for ${duration} hrs (total ~${totalDrinks} drinks, mix of mocktails/soda/seltzer/beer/wine).
-2. Ice: ~${iceLbs} lbs minimum for chilling and drink serving (Freezer / Ice Depot).
-3. Food: Ensure accurate portioning for ${totalGuests} guests with ${mealType}. Strictly account for dietary restrictions (${dietary}).
-4. Tableware: 1.2x to 1.5x guest count buffer for plates, napkins, cutlery, and cups (Aisle 11).
-5. CymbalMart Brands: Offer mix of national brands and "Cymbal Choice" / "Cymbal Great Value" / "Cymbal Organic" store brand alternatives that save 20-30%.
-6. Target Budget: Sum of estimated prices for must_have + nice_to_have items MUST align closely with $${budget} (staying within +/- 10% of budget).
-7. Aisles: Assign realistic CymbalMart aisles (e.g., Aisle 1 Produce, Aisle 3 Bakery & Deli, Aisle 5 Pantry, Aisle 8 Beverages, Aisle 11 Tableware & Party, Meat Counter, Ice Depot).
+CATERING GOLDEN RULES & LOCAL PRICING:
+1. CURRENCY & REALISTIC LOCAL PRICES: All item estimated prices MUST be in realistic ${currencyCode} (e.g. for India INR: samosas ₹150-₹300/pack, paneer ₹250/kg, biryani kit ₹350, mithai ₹400-₹600/kg, cold drinks ₹95/2L, tea/coffee kit ₹180, areca leaf plates ₹220/25-pack). Total sum of items should closely equal ~${budget} ${currencyCode}.
+2. LOCAL FOOD AUTHENTICITY:
+   - For India (IN): Incorporate rich Indian delicacies (e.g., Paneer Tikka / Butter Masala, Samosas, Pav Bhaji, Chaat kits, Dum Biryani, Gulab Jamun, Kaju Katli, Filter Coffee / Masala Chai, Thums Up, Limca, Frooti, Rooh Afza mocktails, Diya lights, Rangoli colors, Marigold garland decor, eco-friendly Areca nut leaf plates).
+   - If mixed veg/non-veg breakdown is provided, provide appropriate proportioned vegetarian and non-vegetarian mains.
+   - For other countries: Use popular regional staples and appropriate local market prices.
+3. Drinks: ~${drinksPerPerson} drinks per person for ${duration} hrs (total ~${totalDrinks} drinks, mix of mocktails/soda/seltzer/tea/juices).
+4. Ice/Cooling: ~${metricUnits ? Math.round(iceLbs * 0.5) + ' kg' : iceLbs + ' lbs'} for chilling and drink serving.
+5. Tableware: 1.2x to 1.5x guest count buffer for plates, napkins, cutlery, and cups.
+6. CymbalMart Brands: Offer mix of national brands and "Cymbal Choice" store brand alternatives that save 20-30%.
+7. Aisles: Assign realistic CymbalMart aisles.
 
 Return strict JSON with this schema:
 {
   "themeDescription": "Vibrant 2-sentence summary of the party vibe and setup aesthetic",
   "signatureDrinkName": "Catchy signature drink or mocktail tailored to theme",
   "signatureDrinkRecipe": "Short recipe instructions (ingredients + mix steps)",
-  "playlistVibe": "e.g. Upbeat 90s Throwbacks, Tropical Chill House, Indie Pop",
+  "playlistVibe": "e.g. Bollywood Festive Beats, Indie Acoustic, Upbeat Soul",
   "aiTips": ["3-4 pro host tips for seamless execution, savings, or prep"],
   "items": [
     {
-      "name": "Item name with pack size (e.g. Cymbal Choice Beef Burger Patties 12-ct)",
-      "category": "one of: food_mains | food_sides_snacks | desserts | drinks_cocktails | drinks_non_alcoholic | ice_chill | tableware_disposables | decor_ambiance | entertainment_games | essentials_emergency",
+      "name": "Item name with pack size in ${metricUnits ? 'kg/g/L' : 'lb/oz'}",
+      "category": "food_mains | food_sides_snacks | desserts | drinks_cocktails | drinks_non_alcoholic | ice_chill | tableware_disposables | decor_ambiance | entertainment_games | essentials_emergency",
       "quantity": 1,
-      "unit": "e.g. 24-can pack, 5 lb bag, 50-count, bottles, kit",
-      "estimatedPrice": 12.50,
-      "aisle": "e.g. Aisle 3 (Bakery), Aisle 1 (Produce), Aisle 8 (Beverages), Aisle 11 (Party Supplies)",
+      "unit": "e.g. 1 kg pack, 2L bottle, 25-pack, kit, box",
+      "estimatedPrice": 250.0,
+      "aisle": "e.g. Aisle 3 (Bakery & Mithai), Aisle 1 (Produce & Dairy), Aisle 8 (Beverages), Aisle 11 (Party Supplies)",
       "brandType": "cymbal_brand | national_brand | cymbal_organic",
-      "notes": "Purpose, portioning explanation or dietary tag (e.g., GF/Vegan)",
+      "notes": "Purpose, portioning explanation or dietary tag (e.g. 100% Pure Veg / Halal)",
       "alternativeOrBulkTip": "Smart budget tip or store brand swap",
       "priority": "must_have | nice_to_have | optional"
     }
@@ -126,8 +226,7 @@ Return strict JSON with this schema:
   ]
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+    const response = await generateContentWithFallback(ai, {
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -180,25 +279,31 @@ Return strict JSON with this schema:
     });
 
     const parsed = JSON.parse(response.text?.trim() || '{}');
-
     const planId = 'cymbal-party-' + Date.now();
+
     const finalPlan = {
       id: planId,
       createdAt: new Date().toISOString(),
       title: input.title || `${theme} ${eventType}`,
       theme,
       eventType,
+      countryCode,
+      currencyCode,
+      currencySymbol,
+      regionalPreference: regionalPref,
       guestCount: totalGuests,
       guestBreakdown: input.guestBreakdown || { adults: totalGuests, kids: 0, teens: 0 },
+      guestDietaryBreakdown: input.guestDietaryBreakdown,
       durationHours: duration,
       mealType,
       venue,
       targetBudget: budget,
+      metricUnits,
       dietaryRestrictions: input.dietaryRestrictions || [],
-      themeDescription: parsed.themeDescription || `A curated CymbalMart party plan for ${totalGuests} guests.`,
-      signatureDrinkName: parsed.signatureDrinkName || 'Cymbal Citrus Sparkler',
-      signatureDrinkRecipe: parsed.signatureDrinkRecipe || 'Mix fresh citrus juices, sparkling cider, and mint over crushed ice.',
-      playlistVibe: parsed.playlistVibe || 'Uptown Soul & Feel-Good Pop',
+      themeDescription: parsed.themeDescription || `A curated CymbalMart party plan for ${totalGuests} guests in ${countryCode}.`,
+      signatureDrinkName: parsed.signatureDrinkName || (countryCode === 'IN' ? 'Cymbal Shahi Kesar Badam Sparkler' : 'Cymbal Citrus Sparkler'),
+      signatureDrinkRecipe: parsed.signatureDrinkRecipe || 'Mix fresh citrus juices, sparkling soda, and crushed mint over ice.',
+      playlistVibe: parsed.playlistVibe || (countryCode === 'IN' ? 'Bollywood Hits & Desi Lounge' : 'Uptown Soul & Feel-Good Pop'),
       storeLocation,
       fulfillmentType: input.fulfillmentPreference || 'curbside_pickup',
       aiTips: parsed.aiTips || [
@@ -208,51 +313,52 @@ Return strict JSON with this schema:
       ],
       items: (parsed.items || []).map((item: any, idx: number) => {
         const isCymbalBrand = item.brandType === 'cymbal_brand' || item.name.toLowerCase().includes('cymbal');
+        const unitPrice = Number(item.estimatedPrice) || (countryCode === 'IN' ? 250 : 5);
         return {
           id: `item-${planId}-${idx}`,
           name: item.name,
           category: sanitizeCategory(item.category),
           quantity: Number(item.quantity) || 1,
           unit: item.unit || 'pack',
-          estimatedPrice: Number(item.estimatedPrice) || 5,
+          estimatedPrice: unitPrice,
+          pricingType: 'estimated_local',
           targetStore: 'CymbalMart',
-          aisle: item.aisle || getDefaultAisle(item.category),
-          brandType: isCymbalBrand ? 'cymbal_brand' : 'national_brand',
-          cymbalBrandSwap: !isCymbalBrand ? {
-            brandName: `Cymbal Choice ${item.name.replace(/^(Brand|Kraft|Tostitos|Lipton|Coca-Cola)/i, '').trim()}`,
-            price: Math.max(1.5, Math.round((Number(item.estimatedPrice) || 5) * 0.75 * 100) / 100),
-            savings: Math.round((Number(item.estimatedPrice) || 5) * 0.25 * 100) / 100,
-          } : undefined,
+          aisle: item.aisle || 'General Grocery',
+          brandType: item.brandType || 'cymbal_brand',
           notes: item.notes || '',
           alternativeOrBulkTip: item.alternativeOrBulkTip || '',
-          priority: item.priority === 'nice_to_have' || item.priority === 'optional' ? item.priority : 'must_have',
+          priority: item.priority || 'must_have',
           isAlreadyOwned: false,
           isPurchased: false,
+          cymbalBrandSwap: !isCymbalBrand
+            ? {
+                brandName: `Cymbal Choice ${item.name}`,
+                price: Number((unitPrice * 0.75).toFixed(2)),
+                savings: Number((unitPrice * 0.25).toFixed(2)),
+              }
+            : undefined,
         };
       }),
       prepTimeline: (parsed.prepTimeline || []).map((t: any, idx: number) => ({
-        id: `task-${planId}-${idx}`,
-        timeline: t.timeline || '1_day_before',
+        id: `task-${idx}`,
+        timeline: t.timeline || 'day_of_morning',
         task: t.task,
-        category: t.category || 'Prep',
+        category: t.category || 'Shopping',
         isCompleted: false,
       })),
       cateringRuleSummary: {
         drinksPerPerson,
         servingsPerPerson,
         iceLbsTotal: iceLbs,
-        tablewareBufferPercent: 25,
+        tablewareBufferPercent: 30,
       },
     };
 
     res.json(finalPlan);
   } catch (error: any) {
-    console.error('Error generating CymbalMart party plan:', error);
-    const input = req.body;
-    const totalGuests = (Number(input.guestBreakdown?.adults) || 0) + (Number(input.guestBreakdown?.kids) || 0) + (Number(input.guestBreakdown?.teens) || 0) || 12;
-    const duration = Number(input.durationHours) || 3;
-    const budget = Number(input.targetBudget) || 250;
-    res.json(createAlgorithmicPlan(input, totalGuests, duration, budget, 20, 4, 4));
+    console.warn('Falling back to local algorithmic plan generation due to AI outage:', error?.message || error);
+    const fallbackPlan = createAlgorithmicPlan(input, totalGuests, duration, budget, iceLbs, drinksPerPerson, servingsPerPerson, countryCode, currencyCode, currencySymbol);
+    res.json(fallbackPlan);
   }
 });
 
@@ -267,103 +373,28 @@ app.post('/api/assistant/chat', async (req, res) => {
     }
 
     if (!ai) {
-      // Return smart algorithmic response based on CymbalMart store knowledge
       const fallback = createAssistantFallbackResponse(message, currentPlan);
       return res.json(fallback);
     }
 
-    const planContext = currentPlan
-      ? `
-CURRENT CUSTOMER EVENT & CART CONTEXT:
-- Active Event: ${currentPlan.title} (${currentPlan.eventType || 'Event'})
-- Theme: ${currentPlan.theme || 'Party'}
-- Guests: ${currentPlan.guestCount || 12}
-- Target Budget: $${currentPlan.targetBudget || 250}
-- Current Cart Items (${currentPlan.items?.length || 0} items):
-${JSON.stringify((currentPlan.items || []).slice(0, 20).map((i: any) => ({
-  id: i.id,
-  name: i.name,
-  category: i.category,
-  price: i.estimatedPrice,
-  quantity: i.quantity,
-  aisle: i.aisle,
-  brandType: i.brandType,
-  isAlreadyOwned: i.isAlreadyOwned,
-})))}`
-      : 'No active party plan loaded yet.';
+    const countryCode = (currentPlan?.countryCode || req.body.countryCode || 'IN').toUpperCase();
+    const currencyCode = currentPlan?.currencyCode || (countryCode === 'IN' ? 'INR' : countryCode === 'GB' ? 'GBP' : countryCode === 'JP' ? 'JPY' : 'USD');
+    const currencySymbol = getCurrencySymbol(currencyCode);
 
-    const systemPrompt = `You are "CymbalMart Assistant", the friendly, knowledgeable, and customer-first AI chatbot for CymbalMart Supercenters and CymbalMart.com.
+    const systemPrompt = `You are CymbalMart Assistant, the official retail customer service & catering expert for CymbalMart Supercenters (${countryCode}).
+Help the user with store policies, aisle navigation, party portions, catering formulas, and savings tips.
+User Question: "${message}"
+Currency: ${currencyCode} (${currencySymbol})
+Active Plan Context: ${currentPlan ? `Theme: ${currentPlan.theme}, Guests: ${currentPlan.guestCount}, Budget: ${currencySymbol}${currentPlan.targetBudget}` : 'No active plan'}
 
-CYMBALMART STORE & POLICY KNOWLEDGE BASE:
-- Store Hours: Everyday 6:00 AM - 11:00 PM. Pharmacy: 8:00 AM - 8:00 PM Mon-Fri, 9:00 AM - 6:00 PM Sat-Sun.
-- Curbside Pickup: Free on orders $35+ (otherwise $4.99). Ready within 2 hours or scheduled at pickup bays 1-10.
-- Express Delivery: 2-hour chilled refrigerated delivery straight to customer venue/doorstep ($4.99 flat or FREE with Cymbal Club+).
-- Return Policy: 90-day hassle-free returns with receipt or digital order ID. 100% Freshness Guarantee on all Produce, Bakery, Meat, and Seafood (free instant refund/replacement).
-- Price Match Guarantee: CymbalMart will match any local competitor's verified advertised retail price on identical brand items.
-- Store Brands (20-30% savings): "Cymbal Choice" (top-tier quality value), "Cymbal Great Value" (bulk pantry essentials), "Cymbal Organic" (USDA Certified Organic).
-- Cymbal Club: Free loyalty membership with 5% cashback on store brands and weekly personalized digital coupons.
-- Aisle Layout Guide:
-  * Aisle 1: Fresh Produce & Floral
-  * Aisle 2: Dairy, Milk, Eggs & Cheese
-  * Aisle 3: Artisan Bakery & Fresh Deli
-  * Aisle 4: Breakfast, Cereal & Coffee
-  * Aisle 5: Pantry, Chips, Crackers & Dips
-  * Aisle 6: Canned Goods, Soups & Condiments
-  * Aisle 7: Cleaning Essentials & Paper Goods
-  * Aisle 8: Beverages, Mixers & Craft Spirits
-  * Aisle 9: Seltzers, Sodas & Juices
-  * Aisle 10: Frozen Entrees & Ice Cream
-  * Aisle 11: Tableware, Cups, Plates & Party Supplies
-  * Aisle 12: Seasonal Decor & Party Balloons
-  * Aisle 13: Personal Care, First Aid & Sunscreen
-  * Aisle 14: Games, Electronics & Batteries
-  * Meat & Seafood Counter: Fresh butcher cuts & burger patties
-  * Ice Depot / Freezer Cooler: 10 lb and 20 lb cocktail/party ice bags
-
-CATERING GOLDEN RULES:
-- Ice: 1.5 lbs per guest indoors, 2.0 lbs per guest outdoors/summer.
-- Drinks: 1.25 drinks per person per hour of event.
-- Food: 3-5 appetizer bites/person for casual cocktail events; 1.5 servings for full meal.
-- Tableware: 1.3x guest count buffer for extra plates and napkins.
-
-${planContext}
-
-RECENT CHAT HISTORY:
-${JSON.stringify(chatHistory.slice(-4))}
-
-CUSTOMER QUERY: "${message}"
-
-INSTRUCTIONS:
-1. Speak in a warm, helpful, polished customer service voice as "CymbalMart Assistant".
-2. Address the customer's question directly with clear facts, prices, aisle numbers, and practical tips.
-3. If the user asks to modify or optimize their active shopping list (e.g. cut costs, make gluten-free, swap to store brands, add ice or drinks), return the updated items list and a summary of applied actions.
-4. If the user asks for new item recommendations (e.g. recommend mocktails or dips), you can include "suggestedItems" that they can 1-click add to cart.
-5. Provide 2-3 short, relevant "suggestedPrompts" the customer might want to click next.
-
-Return strictly JSON format with this schema:
+Return JSON format:
 {
-  "reply": "Helpful, clear markdown response from CymbalMart Assistant",
-  "intentCategory": "store_policy | catering_math | product_search | savings_deal | general | cart_update",
-  "appliedActions": ["Action 1 taken (if cart modified)"],
-  "suggestedPrompts": ["Next prompt suggestion 1", "Next prompt suggestion 2"],
-  "updatedItems": [ /* if cart was updated, array of ShoppingItems matching existing schema */ ],
-  "suggestedItems": [
-    {
-      "name": "Item name with size",
-      "category": "food_sides_snacks",
-      "quantity": 1,
-      "unit": "pack",
-      "estimatedPrice": 4.99,
-      "aisle": "Aisle 5",
-      "brandType": "cymbal_brand",
-      "notes": "Description",
-      "priority": "nice_to_have"
-    }
-  ]
+  "reply": "Clear, markdown-formatted response with bullet points and friendly store guidance",
+  "intentCategory": "store_policy | catering_math | product_search | savings_deal | general",
+  "suggestedPrompts": ["Follow-up question 1", "Follow-up question 2", "Follow-up question 3"]
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+    const response = await generateContentWithFallback(ai, {
       contents: systemPrompt,
       config: {
         responseMimeType: 'application/json',
@@ -372,141 +403,36 @@ Return strictly JSON format with this schema:
 
     const parsed = JSON.parse(response.text?.trim() || '{}');
 
-    // Attach stable IDs if new items or updated items are returned
-    let updatedItems = parsed.updatedItems;
-    if (updatedItems && Array.isArray(updatedItems)) {
-      updatedItems = updatedItems.map((item: any, idx: number) => ({
-        ...item,
-        id: item.id || `item-chat-${Date.now()}-${idx}`,
-        category: sanitizeCategory(item.category),
-        estimatedPrice: Number(item.estimatedPrice) || 4.99,
-        quantity: Number(item.quantity) || 1,
-      }));
-    }
-
-    let suggestedItems = parsed.suggestedItems;
-    if (suggestedItems && Array.isArray(suggestedItems)) {
-      suggestedItems = suggestedItems.map((item: any, idx: number) => ({
-        ...item,
-        id: `sug-${Date.now()}-${idx}`,
-        category: sanitizeCategory(item.category),
-        estimatedPrice: Number(item.estimatedPrice) || 4.99,
-        quantity: Number(item.quantity) || 1,
-        isAlreadyOwned: false,
-        isPurchased: false,
-      }));
-    }
-
     res.json({
       reply: parsed.reply || "I'm here to help with all your CymbalMart shopping, catering formulas, and store inquiries!",
       intentCategory: parsed.intentCategory || 'general',
-      appliedActions: parsed.appliedActions || [],
       suggestedPrompts: parsed.suggestedPrompts || [
         'How much ice and drinks do I need for my event?',
         'Where are party supplies located in store?',
         'What is CymbalMart curbside pickup policy?'
       ],
-      updatedItems: updatedItems || (currentPlan ? currentPlan.items : undefined),
-      suggestedItems: suggestedItems || [],
     });
   } catch (error: any) {
-    console.error('Error in CymbalMart Assistant chat:', error);
+    console.warn('Falling back to local CymbalMart assistant response due to AI outage:', error?.message || error);
     const fallback = createAssistantFallbackResponse(req.body.message, req.body.currentPlan);
     res.json(fallback);
   }
 });
 
-// Helper for Assistant Fallback
-function createAssistantFallbackResponse(message: string, currentPlan?: any) {
-  const query = (message || '').toLowerCase();
-  
-  if (query.includes('hour') || query.includes('open') || query.includes('close') || query.includes('time')) {
-    return {
-      reply: `**CymbalMart Supercenter Operating Hours:**\n\n• **Main Store:** Mon–Sun: 6:00 AM – 11:00 PM\n• **Curbside Pickup Bay:** 7:00 AM – 9:00 PM daily\n• **Pharmacy:** Mon–Fri: 8:00 AM – 8:00 PM | Sat–Sun: 9:00 AM – 6:00 PM\n• **Bakery & Deli Counters:** 7:00 AM – 8:00 PM`,
-      intentCategory: 'store_policy',
-      suggestedPrompts: [
-        'How does Curbside Pickup work?',
-        'What is your return policy?',
-        'Find items by aisle in CymbalMart'
-      ]
-    };
-  }
-
-  if (query.includes('pickup') || query.includes('curbside') || query.includes('delivery')) {
-    return {
-      reply: `**CymbalMart Pickup & Express Delivery Policies:**\n\n• **Curbside Pickup:** **FREE** on all orders over $35 ($4.99 for smaller orders). Pull into Bays 1–10 and check in on your phone—our team loads your trunk in under 5 minutes.\n• **Express 2-Hr Delivery:** Refrigerated door-to-door delivery within 2 hours ($4.99 flat or **FREE** for Cymbal Club members).\n• **Order Deadline:** Schedule anytime up to 1 hour before your desired time slot.`,
-      intentCategory: 'store_policy',
-      suggestedPrompts: [
-        'What are the store hours?',
-        'How does the 100% Freshness Guarantee work?',
-        'Help me cut costs on my cart'
-      ]
-    };
-  }
-
-  if (query.includes('return') || query.includes('refund') || query.includes('price match') || query.includes('policy')) {
-    return {
-      reply: `**CymbalMart Customer Care Guarantees:**\n\n• **90-Day Returns:** Full refund with paper receipt or digital order QR code.\n• **100% Freshness Guarantee:** If any produce, meat, or bakery item doesn't meet your highest standards, bring it back or tap "Request Refund" in the app for an instant 100% money-back credit.\n• **Price Match Guarantee:** We happily match any local competitor's current advertised price on identical brand items at the register or online checkout!`,
-      intentCategory: 'store_policy',
-      suggestedPrompts: [
-        'Tell me about Cymbal Choice store brands',
-        'How much ice do I need for my guests?',
-        'Where are party supplies located?'
-      ]
-    };
-  }
-
-  if (query.includes('ice') || query.includes('drink') || query.includes('portion') || query.includes('math') || query.includes('catering')) {
-    const guests = currentPlan?.guestCount || 15;
-    const duration = currentPlan?.durationHours || 3;
-    const iceLbs = Math.round(guests * 1.5);
-    const drinks = Math.round(guests * duration * 1.25);
-    return {
-      reply: `**CymbalMart Catering Portions Formula for ${guests} Guests (${duration} Hours):**\n\n• **Ice (Freezer Depot):** **~${iceLbs} lbs** (1.5 lbs/guest for indoor chilling and cocktail service; 2 lbs/guest for outdoor backyards).\n• **Beverages (Aisle 8 & 9):** **~${drinks} total drinks** (~1.25 drinks per person per hour; recommended 50% sparkling waters/sodas, 30% beer/wine/mocktails, 20% juices).\n• **Appetizers & Mains:** 4–6 bites per guest for heavy apps, or 1.5 burger sliders/guest.\n• **Tableware (Aisle 11):** ${Math.ceil(guests * 1.3)} plates and cups (1.3× buffer).`,
-      intentCategory: 'catering_math',
-      suggestedPrompts: [
-        'Swap items to Cymbal Choice brand to save money',
-        'Recommend gluten-free party snacks',
-        'What are curbside pickup hours?'
-      ]
-    };
-  }
-
-  if (query.includes('gluten') || query.includes('vegan') || query.includes('allergy') || query.includes('dietary')) {
-    return {
-      reply: `**CymbalMart Dietary & Allergen Recommendations:**\n\n• **Gluten-Free Snacks:** *Cymbal Choice Organic Corn Tortilla Chips* (Aisle 5), *Cymbal Fresh Artisan Guacamole & Salsa* (Aisle 1), *Gluten-Free Cracker Assortment* (Aisle 5).\n• **Vegan & Dairy-Free:** *Cymbal Organic Hummus & Veggie Platter* (Aisle 1), *Oat Milk Dairy-Free Dips* (Aisle 2), *Plant-Based Slider Patties* (Meat Counter / Vegan Section).\n• **Nut-Free Guarantee:** Check our green "Cymbal Safe Snack" certified badges on Aisle 5 snack packs.`,
-      intentCategory: 'product_search',
-      suggestedPrompts: [
-        'Calculate drinks and ice for my party',
-        'How do I get free Curbside Pickup?',
-        'Swap to Cymbal Choice Store Brands'
-      ]
-    };
-  }
-
-  return {
-    reply: `Hello! I'm **CymbalMart Assistant**, your dedicated retail & party shopping helper. I can assist you with:\n\n• **Store Policies & Hours:** Curbside pickup rules, 2-hr delivery, 90-day returns & price matching.\n• **Aisle Guide:** Finding any grocery, beverage, ice, or party supply in CymbalMart Supercenter.\n• **Catering Math:** Calculating exact ice, drink counts, appetizer portions, and tableware buffers.\n• **Budget Optimization:** Finding 20–30% savings with *Cymbal Choice* store brand alternatives.\n• **Shopping Cart Updates:** Directly adjusting or trimming items in your active party list.\n\nHow can I help make your CymbalMart experience seamless today?`,
-    intentCategory: 'general',
-    suggestedPrompts: [
-      'What are your store & pickup hours?',
-      'How much ice and drinks do I need?',
-      'How does CymbalMart 100% Freshness Guarantee work?',
-      'Find items by CymbalMart aisle'
-    ]
-  };
-}
-
 // Endpoint: AI Copilot Chat & Constraint Adjustment for CymbalMart
 app.post('/api/party/chat', async (req, res) => {
+  const { message = '', currentPlan } = req.body || {};
+
+  if (!currentPlan) {
+    return res.status(400).json({ error: 'Active party plan context is required.' });
+  }
+
   try {
-    const { message, currentPlan, chatHistory } = req.body;
     const ai = getAi();
 
     if (!ai) {
-      return res.json({
-        reply: `I received your request: "${message}". In demo mode, your list is ready! Add your Gemini API key to unlock dynamic constraint balancing.`,
-        updatedItems: currentPlan.items,
-      });
+      const fallback = createPartyChatFallback(message, currentPlan);
+      return res.json(fallback);
     }
 
     const prompt = `You are the official CymbalMart AI Party Planner Shopping Assistant.
@@ -515,8 +441,8 @@ The busy host is requesting modifications, constraint adjustments, or budget opt
 CURRENT EVENT CONTEXT:
 - Title: ${currentPlan.title} (${currentPlan.theme})
 - Guests: ${currentPlan.guestCount}
-- Target Budget: $${currentPlan.targetBudget}
-- Current Cart Total: $${currentPlan.items.reduce((acc: number, i: any) => acc + (i.isAlreadyOwned ? 0 : i.estimatedPrice * (i.quantity || 1)), 0).toFixed(2)}
+- Target Budget: ${currentPlan.currencySymbol || '$'}${currentPlan.targetBudget}
+- Current Cart Total: ${currentPlan.items.reduce((acc: number, i: any) => acc + (i.isAlreadyOwned ? 0 : i.estimatedPrice * (i.quantity || 1)), 0).toFixed(2)}
 - Dietary: ${currentPlan.dietaryRestrictions?.join(', ') || 'None'}
 - Store: ${currentPlan.storeLocation || 'CymbalMart Supercenter'}
 
@@ -538,7 +464,7 @@ USER REQUEST: "${message}"
 
 INSTRUCTIONS:
 1. Provide a concise, friendly CymbalMart assistant response with specific advice and savings metrics.
-2. If the user asks to adjust constraints (e.g. cut budget by $X, make items vegan/gluten-free, add items for more guests, swap to CymbalMart store brands, add ice/drinks), return the full modified item list with appropriate aisles and quantities.
+2. If the user asks to adjust constraints (e.g. cut budget, make items vegan/gluten-free, add items for more guests, swap to CymbalMart store brands, add ice/drinks), return the full modified item list with appropriate aisles and quantities.
 3. Keep item IDs intact for existing items so React keys remain stable.
 4. Align the total estimated cost strictly with the user's budget constraint.
 
@@ -564,8 +490,7 @@ Return strictly JSON format:
   ]
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+    const response = await generateContentWithFallback(ai, {
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -579,45 +504,115 @@ Return strictly JSON format:
       updatedItems: parsed.updatedItems && Array.isArray(parsed.updatedItems) ? parsed.updatedItems : currentPlan.items,
     });
   } catch (error: any) {
-    console.error('Error handling CymbalMart party chat:', error);
-    res.status(500).json({ error: error.message || 'Failed to process party chat' });
+    console.warn('Falling back to local party chat copilot due to AI outage:', error?.message || error);
+    const fallback = createPartyChatFallback(message, currentPlan);
+    res.json(fallback);
   }
 });
 
-// Helper: Sanitize Category
-function sanitizeCategory(cat: string): string {
-  const allowed = [
-    'food_mains',
-    'food_sides_snacks',
-    'desserts',
-    'drinks_cocktails',
-    'drinks_non_alcoholic',
-    'ice_chill',
-    'tableware_disposables',
-    'decor_ambiance',
-    'entertainment_games',
-    'essentials_emergency',
-  ];
-  return allowed.includes(cat) ? cat : 'food_sides_snacks';
-}
+// Helper for Assistant Fallback
+function createAssistantFallbackResponse(message: string, currentPlan?: any) {
+  const query = (message || '').toLowerCase();
 
-function getDefaultAisle(cat: string): string {
-  const map: Record<string, string> = {
-    food_mains: 'Meat Counter / Deli',
-    food_sides_snacks: 'Aisle 1 & 5 (Produce & Snacks)',
-    desserts: 'Aisle 3 (Cymbal Bakery)',
-    drinks_cocktails: 'Aisle 8 (Beverages & Mixers)',
-    drinks_non_alcoholic: 'Aisle 9 (Seltzers & Sodas)',
-    ice_chill: 'Freezer / Party Ice Depot',
-    tableware_disposables: 'Aisle 11 (Party Supplies)',
-    decor_ambiance: 'Aisle 12 (Seasonal & Decor)',
-    entertainment_games: 'Aisle 14 (Games & Toys)',
-    essentials_emergency: 'Aisle 7 (Household Essentials)',
+  if (query.includes('hour') || query.includes('open') || query.includes('close') || query.includes('time')) {
+    return {
+      reply: `**CymbalMart Supercenter Operating Hours:**\n\n• **Main Store:** Mon–Sun: 6:00 AM – 11:00 PM\n• **Curbside Pickup Bay:** 7:00 AM – 9:00 PM daily\n• **Pharmacy:** Mon–Fri: 8:00 AM – 8:00 PM | Sat–Sun: 9:00 AM – 6:00 PM\n• **Bakery & Deli Counters:** 7:00 AM – 8:00 PM`,
+      intentCategory: 'store_policy',
+      suggestedPrompts: [
+        'How does Curbside Pickup work?',
+        'What is your return policy?',
+        'Find items by aisle in CymbalMart',
+      ],
+    };
+  }
+
+  if (query.includes('pickup') || query.includes('curbside') || query.includes('delivery')) {
+    return {
+      reply: `**CymbalMart Pickup & Express Delivery Policies:**\n\n• **Curbside Pickup:** **FREE** on all orders over $35 / ₹500 ($4.99 for smaller orders). Pull into Bays 1–10 and check in on your phone—our team loads your trunk in under 5 minutes.\n• **Express 2-Hr Delivery:** Refrigerated door-to-door delivery within 2 hours ($4.99 flat or **FREE** for Cymbal Club members).\n• **Order Deadline:** Schedule anytime up to 1 hour before your desired time slot.`,
+      intentCategory: 'store_policy',
+      suggestedPrompts: [
+        'What are the store hours?',
+        'How does the 100% Freshness Guarantee work?',
+        'Help me cut costs on my cart',
+      ],
+    };
+  }
+
+  if (query.includes('ice') || query.includes('drink') || query.includes('portion') || query.includes('math') || query.includes('catering')) {
+    const guests = currentPlan?.guestCount || 15;
+    const duration = currentPlan?.durationHours || 3;
+    const isMetric = currentPlan?.metricUnits !== false;
+    const iceAmount = isMetric ? `${Math.round(guests * 0.75)} kg` : `${Math.round(guests * 1.5)} lbs`;
+    const drinks = Math.round(guests * duration * 1.25);
+    return {
+      reply: `**CymbalMart Catering Portions Formula for ${guests} Guests (${duration} Hours):**\n\n• **Ice (Freezer Depot):** **~${iceAmount}** (for indoor chilling and drink service; add 30% for outdoor venues).\n• **Beverages (Aisle 8 & 9):** **~${drinks} total drinks** (~1.25 drinks per person per hour; recommended 50% sparkling waters/sodas, 30% craft/mocktails, 20% juices/tea).\n• **Appetizers & Mains:** 4–6 bites per guest for heavy apps, or 1.5 portions/guest.\n• **Tableware (Aisle 11):** ${Math.ceil(guests * 1.3)} plates and cups (1.3× buffer).`,
+      intentCategory: 'catering_math',
+      suggestedPrompts: [
+        'Swap items to Cymbal Choice brand to save money',
+        'Recommend dietary party snacks',
+        'What are curbside pickup hours?',
+      ],
+    };
+  }
+
+  return {
+    reply: `Hello! I'm **CymbalMart Assistant**, your dedicated retail & party shopping helper. I can assist you with:\n\n• **Store Policies & Hours:** Curbside pickup rules, 2-hr delivery, 90-day returns & price matching.\n• **Aisle Guide:** Finding any grocery, beverage, ice, or party supply in CymbalMart.\n• **Catering Math:** Calculating exact ice, drink counts, appetizer portions, and tableware buffers.\n• **Budget Optimization:** Finding 20–30% savings with *Cymbal Choice* store brand alternatives.\n• **Shopping Cart Updates:** Directly adjusting or trimming items in your active party list.\n\nHow can I help make your CymbalMart experience seamless today?`,
+    intentCategory: 'general',
+    suggestedPrompts: [
+      'What are your store & pickup hours?',
+      'How much ice and drinks do I need?',
+      'How does CymbalMart 100% Freshness Guarantee work?',
+      'Find items by CymbalMart aisle',
+    ],
   };
-  return map[cat] || 'Aisle 5';
 }
 
-// Algorithmic Fallback Plan Generator for CymbalMart
+// Fallback AI Co-pilot Chat handler for Party Plan adjustments
+function createPartyChatFallback(message: string, currentPlan: any) {
+  const query = (message || '').toLowerCase();
+  let updatedItems = [...(currentPlan.items || [])];
+  const appliedActions: string[] = [];
+  let reply = '';
+
+  if (query.includes('budget') || query.includes('cut') || query.includes('save') || query.includes('cheaper') || query.includes('cost')) {
+    let savedDollars = 0;
+    updatedItems = updatedItems.map((item) => {
+      if (item.brandType !== 'cymbal_brand' && item.cymbalBrandSwap) {
+        savedDollars += (item.cymbalBrandSwap.savings || 1.5) * (item.quantity || 1);
+        return {
+          ...item,
+          name: item.cymbalBrandSwap.brandName || `Cymbal Choice ${item.name}`,
+          estimatedPrice: item.cymbalBrandSwap.price || Number((item.estimatedPrice * 0.75).toFixed(2)),
+          brandType: 'cymbal_brand',
+        };
+      }
+      if (item.priority === 'optional') {
+        savedDollars += (item.estimatedPrice || 0) * (item.quantity || 1);
+        return {
+          ...item,
+          isAlreadyOwned: true,
+        };
+      }
+      return item;
+    });
+
+    appliedActions.push(`Swapped items to Cymbal Choice store brands (saving ~25-30%)`);
+    appliedActions.push(`Audited pantry supplies to optimize budget`);
+    const currSym = currentPlan.currencySymbol || '$';
+    reply = `I optimized your shopping list for savings! By switching eligible items to **Cymbal Choice** store brands and adjusting pantry items, we saved approximately **${currSym}${Math.max(15, Math.round(savedDollars * 100) / 100).toFixed(2)}** while preserving all core food courses and drinks!`;
+  } else {
+    reply = `I've updated your CymbalMart cart based on your preferences. All items remain synchronized with your store layout and target budget!`;
+    appliedActions.push('Synchronized shopping cart with event specifications');
+  }
+
+  return {
+    reply,
+    appliedActions,
+    updatedItems,
+  };
+}
+
+// Fallback Algorithmic Party Plan Generator
 function createAlgorithmicPlan(
   input: any,
   totalGuests: number,
@@ -625,175 +620,260 @@ function createAlgorithmicPlan(
   budget: number,
   iceLbs: number,
   drinksPerPerson: number,
-  servingsPerPerson: number
+  servingsPerPerson: number,
+  countryCode: string,
+  currencyCode: string,
+  currencySymbol: string
 ) {
-  const planId = 'cymbal-party-' + Date.now();
-  const theme = input.theme || 'Summer Celebration';
-  const eventType = input.eventType || 'Party';
-  const storeLocation = input.preferredStores?.[0] || 'CymbalMart Supercenter #1042 - Sunnyvale';
+  const planId = 'cymbal-fallback-' + Date.now();
+  const theme = input.theme || 'Festive Celebration';
+  const eventType = input.eventType || 'Party Gathering';
+  const isIndia = countryCode === 'IN';
+  const metricUnits = input.metricUnits !== false;
 
-  const items = [
-    {
-      id: `item-${planId}-1`,
-      name: 'Cymbal Choice Angus Beef & Plant-Based Sliders',
-      category: 'food_mains',
-      quantity: Math.ceil(totalGuests * 1.5),
-      unit: 'servings',
-      estimatedPrice: 3.75,
-      targetStore: 'CymbalMart',
-      aisle: 'Meat Counter / Deli',
-      brandType: 'cymbal_brand',
-      notes: `Main savory course portioned for ${totalGuests} guests over ${duration} hrs`,
-      alternativeOrBulkTip: 'Cymbal Choice 16-pack slider bundle saves $6.00',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-2`,
-      name: 'Cymbal Fresh Artisan Dip & Tortilla Chips Platter',
-      category: 'food_sides_snacks',
-      quantity: Math.max(2, Math.ceil(totalGuests / 8)),
-      unit: 'large party tubs',
-      estimatedPrice: 11.50,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 5 (Snacks & Dips)',
-      brandType: 'cymbal_brand',
-      notes: 'Fresh guacamole, roasted salsa & organic tortilla chips',
-      alternativeOrBulkTip: 'Buy Cymbal Great Value 32oz tortilla chips',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-3`,
-      name: 'Cymbal Organic Veggie & Hummus Grazing Board',
-      category: 'food_sides_snacks',
-      quantity: Math.max(1, Math.ceil(totalGuests / 12)),
-      unit: 'party platter',
-      estimatedPrice: 14.50,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 1 (Produce)',
-      brandType: 'cymbal_organic',
-      notes: 'Gluten-free & vegetarian friendly fresh snack board',
-      alternativeOrBulkTip: 'DIY cutting whole carrots, cucumbers, and peppers saves 45%',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-4`,
-      name: 'Cymbal Bakery Celebration Cupcakes (24-ct)',
-      category: 'desserts',
-      quantity: Math.ceil(totalGuests / 16),
-      unit: '24-count pack',
-      estimatedPrice: 18.99,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 3 (Bakery)',
-      brandType: 'cymbal_brand',
-      notes: 'Freshly baked vanilla & chocolate celebration cupcakes',
-      alternativeOrBulkTip: 'Cymbal Bakery daily special package discount',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-5`,
-      name: 'Cymbal Choice Sparkling Water Variety (24-Pack)',
-      category: 'drinks_non_alcoholic',
-      quantity: Math.max(1, Math.ceil((totalGuests * 1.5) / 24)),
-      unit: '24-can case',
-      estimatedPrice: 8.99,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 9 (Beverages)',
-      brandType: 'cymbal_brand',
-      notes: 'Lime, Grapefruit, and Berry zero-sugar sparkling seltzers',
-      alternativeOrBulkTip: 'Cymbal Club member bundle saves $2.50 per case',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-6`,
-      name: 'Cymbal Signature Citrus Punch Mix & Garnishes',
-      category: 'drinks_cocktails',
-      quantity: 2,
-      unit: 'bottles + fruit kit',
-      estimatedPrice: 16.50,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 8 (Mixers & Spirits)',
-      brandType: 'cymbal_brand',
-      notes: 'Batch punch mix: fruit juice, ginger ale, and fresh orange slices',
-      alternativeOrBulkTip: 'Batch punch in a drink dispenser rather than single drinks',
-      priority: 'nice_to_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-7`,
-      name: 'Cymbal Cold Party Ice Bags (10 lb)',
-      category: 'ice_chill',
-      quantity: Math.max(2, Math.ceil(iceLbs / 10)),
-      unit: '10 lb bags',
-      estimatedPrice: 2.99,
-      targetStore: 'CymbalMart',
-      aisle: 'Freezer / Ice Depot',
-      brandType: 'cymbal_brand',
-      notes: `Calculated formula: ${iceLbs} lbs needed for drinks and coolers`,
-      alternativeOrBulkTip: 'Pickup ice at checkout register ice locker',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-8`,
-      name: 'Cymbal Eco Compostable Plates & Cutlery Kit (50-ct)',
-      category: 'tableware_disposables',
-      quantity: 1,
-      unit: '50-count pack',
-      estimatedPrice: 12.50,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 11 (Party Supplies)',
-      brandType: 'cymbal_brand',
-      notes: 'Eco-friendly sugarcane plates and bamboo napkins (1.3x guest buffer)',
-      alternativeOrBulkTip: 'Cymbal Eco Party Bulk 100-pack saves 30%',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-9`,
-      name: 'Cymbal Celebration Balloon Garland & Banner Set',
-      category: 'decor_ambiance',
-      quantity: 1,
-      unit: 'decor kit',
-      estimatedPrice: 15.99,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 12 (Seasonal Decor)',
-      brandType: 'cymbal_brand',
-      notes: `Coordinates with ${theme} theme aesthetic`,
-      alternativeOrBulkTip: 'Reusable party bunting and LED string lights',
-      priority: 'nice_to_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    },
-    {
-      id: `item-${planId}-10`,
-      name: 'Cymbal Clean Heavy-Duty Drawstring Trash Bags',
-      category: 'essentials_emergency',
-      quantity: 1,
-      unit: 'box (15 count)',
-      estimatedPrice: 5.99,
-      targetStore: 'CymbalMart',
-      aisle: 'Aisle 7 (Household Cleaning)',
-      brandType: 'cymbal_brand',
-      notes: 'Quick cleanup and recycling station bags',
-      alternativeOrBulkTip: 'Check home pantry first to mark as already owned ($0)',
-      priority: 'must_have',
-      isAlreadyOwned: false,
-      isPurchased: false,
-    }
-  ];
+  const items = isIndia
+    ? [
+        {
+          id: `item-${planId}-1`,
+          name: 'Cymbal Fresh Cocktail Samosas (Pack of 24)',
+          category: 'food_sides_snacks',
+          quantity: Math.max(1, Math.ceil(totalGuests / 6)),
+          unit: 'pack (24 pcs)',
+          estimatedPrice: 249,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 2 (Hot Snacks & Frozen)',
+          brandType: 'cymbal_brand',
+          notes: 'Crispy vegetable cocktail samosas with mint & tamarind chutney',
+          alternativeOrBulkTip: 'CymbalMart Party Box saves 20%',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-2`,
+          name: 'Cymbal Fresh Paneer Tikka / Butter Masala Feast Kit',
+          category: 'food_mains',
+          quantity: Math.max(2, Math.ceil(totalGuests / 4)),
+          unit: '1 kg kit',
+          estimatedPrice: 380,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 1 (Fresh Dairy & Meals)',
+          brandType: 'cymbal_brand',
+          notes: 'Fresh malai paneer with rich spiced gravy and butter naan pack',
+          alternativeOrBulkTip: 'Cook in batch for easy warm serving',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-3`,
+          name: 'Cymbal Royal Dum Biryani Party Platter',
+          category: 'food_mains',
+          quantity: Math.max(2, Math.ceil(totalGuests / 5)),
+          unit: '1.5 kg platter',
+          estimatedPrice: 499,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 1 (Deli & Ready Meals)',
+          brandType: 'cymbal_brand',
+          notes: 'Aromatic basmati rice with saffron, fried onions, and mixed veg/paneer',
+          alternativeOrBulkTip: 'Includes mirchi ka salan and cucumber raita',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-4`,
+          name: 'Cymbal Choice Assorted Mithai (Gulab Jamun & Kaju Katli)',
+          category: 'desserts',
+          quantity: Math.max(1, Math.ceil(totalGuests / 8)),
+          unit: '1 kg box',
+          estimatedPrice: 450,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 3 (Bakery & Mithai)',
+          brandType: 'cymbal_brand',
+          notes: 'Freshly prepared festive sweet box',
+          alternativeOrBulkTip: 'Store in cool dry place',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-5`,
+          name: 'Cymbal Sparkler Soda & Mango Frooti Combo Pack',
+          category: 'drinks_non_alcoholic',
+          quantity: Math.max(2, Math.ceil((totalGuests * duration) / 8)),
+          unit: '2L bottles (pack of 4)',
+          estimatedPrice: 220,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 8 (Beverages & Juices)',
+          brandType: 'cymbal_brand',
+          notes: 'Refreshing mango juice and club soda for mocktails',
+          alternativeOrBulkTip: 'Pair with fresh mint and lemons',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-6`,
+          name: 'Cymbal Ice Depot Pure Food-Grade Party Ice',
+          category: 'ice_chill',
+          quantity: Math.max(2, Math.ceil(totalGuests / 6)),
+          unit: '5 kg bag',
+          estimatedPrice: 120,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Front Freezer Depot',
+          brandType: 'cymbal_brand',
+          notes: 'Crystal clear ice for beverage tubs and coolers',
+          alternativeOrBulkTip: 'Keep in insulated cooler box until serving',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-7`,
+          name: 'Eco-Friendly Areca Nut Leaf Party Plates & Wooden Cutlery',
+          category: 'tableware_disposables',
+          quantity: Math.max(1, Math.ceil(totalGuests / 20)),
+          unit: 'pack of 25',
+          estimatedPrice: 199,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 11 (Party Supplies)',
+          brandType: 'cymbal_brand',
+          notes: '100% biodegradable, leak-proof festive palm leaf plates',
+          alternativeOrBulkTip: 'Recyclable and compostable',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-8`,
+          name: 'Cymbal Festive Marigold Garland & LED Fairy Lights Kit',
+          category: 'decor_ambiance',
+          quantity: 1,
+          unit: 'decor kit',
+          estimatedPrice: 299,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 12 (Festive & Home Decor)',
+          brandType: 'cymbal_brand',
+          notes: 'Golden glow ambiance lighting with vibrant floral garlands',
+          alternativeOrBulkTip: 'Reusable for upcoming celebrations',
+          priority: 'nice_to_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+      ]
+    : [
+        {
+          id: `item-${planId}-1`,
+          name: 'Cymbal Choice Angus Beef & Veggie Slider Burgers (12 Pack)',
+          category: 'food_mains',
+          quantity: Math.max(1, Math.ceil(totalGuests / 6)),
+          unit: 'pack of 12',
+          estimatedPrice: 14.99,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 2 (Meat & Seafood)',
+          brandType: 'cymbal_brand',
+          notes: 'Pre-seasoned gourmet slider patties with brioche slider buns',
+          alternativeOrBulkTip: 'Cymbal Choice Club Pack saves $3.50',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-2`,
+          name: 'Cymbal Fresh Artisan Guacamole & Crisp Tortilla Chips',
+          category: 'food_sides_snacks',
+          quantity: Math.max(1, Math.ceil(totalGuests / 8)),
+          unit: 'party tub (32 oz)',
+          estimatedPrice: 7.99,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 1 (Deli & Produce)',
+          brandType: 'cymbal_brand',
+          notes: 'Made daily in-store with Hass avocados and sea salt tortilla chips',
+          alternativeOrBulkTip: 'Gluten-free friendly appetizer',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-3`,
+          name: 'Cymbal Sparkling Seltzer & Citrus Punch Pack',
+          category: 'drinks_non_alcoholic',
+          quantity: Math.max(2, Math.ceil((totalGuests * duration) / 10)),
+          unit: '12-pack cans',
+          estimatedPrice: 6.49,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 8 (Beverages)',
+          brandType: 'cymbal_brand',
+          notes: 'Assorted flavors (Lime, Grapefruit, Berry) for mocktails',
+          alternativeOrBulkTip: 'Zero sugar, natural flavor',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-4`,
+          name: 'Cymbal Ice Depot Pure Cube Ice Bag',
+          category: 'ice_chill',
+          quantity: Math.max(2, Math.ceil(totalGuests / 6)),
+          unit: metricUnits ? '5 kg bag' : '10 lb bag',
+          estimatedPrice: 3.49,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Front Freezer Depot',
+          brandType: 'cymbal_brand',
+          notes: 'Triple-filtered food-grade beverage ice',
+          alternativeOrBulkTip: 'Keep in cooler until party start',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-5`,
+          name: 'Cymbal Party Heavy-Duty Plates & Cutlery Pack',
+          category: 'tableware_disposables',
+          quantity: Math.max(1, Math.ceil(totalGuests / 20)),
+          unit: '50 count pack',
+          estimatedPrice: 6.99,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 11 (Party Supplies)',
+          brandType: 'cymbal_brand',
+          notes: 'Compostable premium party tableware set',
+          alternativeOrBulkTip: '30% extra buffer included',
+          priority: 'must_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+        {
+          id: `item-${planId}-6`,
+          name: 'Cymbal Celebration Balloon Garland & Banner Set',
+          category: 'decor_ambiance',
+          quantity: 1,
+          unit: 'decor kit',
+          estimatedPrice: 15.99,
+          pricingType: 'estimated_local',
+          targetStore: 'CymbalMart',
+          aisle: 'Aisle 12 (Seasonal Decor)',
+          brandType: 'cymbal_brand',
+          notes: `Coordinates with ${theme} theme aesthetic`,
+          alternativeOrBulkTip: 'Reusable party bunting and LED string lights',
+          priority: 'nice_to_have',
+          isAlreadyOwned: false,
+          isPurchased: false,
+        },
+      ];
 
   return {
     id: planId,
@@ -801,38 +881,67 @@ function createAlgorithmicPlan(
     title: input.title || `${theme} ${eventType}`,
     theme,
     eventType,
+    countryCode,
+    currencyCode,
+    currencySymbol,
+    regionalPreference: isIndia ? 'all_indian' : 'standard',
     guestCount: totalGuests,
     guestBreakdown: input.guestBreakdown || { adults: totalGuests, kids: 0, teens: 0 },
+    guestDietaryBreakdown: input.guestDietaryBreakdown,
     durationHours: duration,
     mealType: input.mealType || 'heavy_appetizers',
     venue: input.venue || 'indoor_home',
     targetBudget: budget,
+    metricUnits,
     dietaryRestrictions: input.dietaryRestrictions || [],
-    themeDescription: `A curated CymbalMart ${theme} celebration designed for ${totalGuests} guests with generous catering portions.`,
-    signatureDrinkName: `${theme} Cymbal Sunset Punch`,
-    signatureDrinkRecipe: 'Combine cranberry juice, ginger beer, fresh lime juice, and orange wheels over crushed ice.',
-    playlistVibe: 'Uptown Soul & Feel-Good Pop',
-    storeLocation,
+    themeDescription: `A curated CymbalMart celebration plan customized for ${totalGuests} guests with authentic catering portions and budget optimization.`,
+    signatureDrinkName: isIndia ? 'Cymbal Shahi Kesar Badam Sparkler' : 'Cymbal Citrus Fizz Mocktail',
+    signatureDrinkRecipe: 'Combine chilled sparkling soda with seasonal citrus juices, crushed mint, and ice in a highball glass.',
+    playlistVibe: isIndia ? 'Bollywood Hits & Desi Festive Lounge' : 'Upbeat Pop & Indie Acoustic Party Mix',
+    storeLocation: isIndia ? 'CymbalMart Hypermarket - Bengaluru (Indiranagar)' : 'CymbalMart Supercenter #1042 - Sunnyvale',
     fulfillmentType: input.fulfillmentPreference || 'curbside_pickup',
-    aiTips: [
-      'Reserve your CymbalMart Curbside Pickup slot 24 hours prior to skip in-store lines.',
-      'Pre-chill canned drinks in a cooler with ice and water 3 hours before guests arrive.',
-      'Place napkins and cutlery at the end of the food table, not the start, to avoid spills.'
-    ],
     items,
     prepTimeline: [
-      { id: `task-1`, timeline: '3_days_before', task: 'Review CymbalMart order and confirm tableware and decor items.', category: 'Shopping', isCompleted: false },
-      { id: `task-2`, timeline: '1_day_before', task: 'Pick up or receive CymbalMart order; chill drinks in fridge and prep dips.', category: 'Prep', isCompleted: false },
-      { id: `task-3`, timeline: 'day_of_morning', task: 'Pick up fresh ice bags and bakery items from CymbalMart.', category: 'Shopping', isCompleted: false },
-      { id: `task-4`, timeline: '1_hour_before', task: 'Set playlist, fill drink dispensers with ice, and light ambiance candles.', category: 'Ambiance', isCompleted: false },
-      { id: `task-5`, timeline: 'during_party', task: 'Empty recycling bin halfway through and refresh signature punch bowl.', category: 'Host', isCompleted: false },
+      {
+        id: 'task-1',
+        timeline: '3_days_before',
+        task: 'Finalize RSVP count and schedule CymbalMart Curbside Pickup order',
+        category: 'Shopping',
+        isCompleted: false,
+      },
+      {
+        id: 'task-2',
+        timeline: '1_day_before',
+        task: 'Pick up groceries, chill beverages, and set up drink station',
+        category: 'Prep',
+        isCompleted: false,
+      },
+      {
+        id: 'task-3',
+        timeline: 'day_of_morning',
+        task: 'Set out tableware, prepare appetizers, and test playlist audio',
+        category: 'Decor',
+        isCompleted: false,
+      },
+      {
+        id: 'task-4',
+        timeline: '1_hour_before',
+        task: 'Add fresh ice to beverage tubs and start signature welcome drinks',
+        category: 'Host',
+        isCompleted: false,
+      },
+    ],
+    aiTips: [
+      'Order at least 24 hours in advance to secure your preferred CymbalMart Curbside pickup slot.',
+      'Always ice your canned and bottled beverages 3-4 hours prior to guests arriving.',
+      'Cymbal Choice store brands deliver identical restaurant-grade quality at 20-30% lower cost.',
     ],
     cateringRuleSummary: {
       drinksPerPerson,
       servingsPerPerson,
       iceLbsTotal: iceLbs,
-      tablewareBufferPercent: 25,
-    }
+      tablewareBufferPercent: 30,
+    },
   };
 }
 

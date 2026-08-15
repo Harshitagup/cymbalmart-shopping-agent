@@ -1,9 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Sparkles,
   Users,
   Clock,
-  DollarSign,
   Utensils,
   Store,
   MapPin,
@@ -19,32 +18,52 @@ import {
   ShoppingBag,
   Navigation,
   Tv,
+  Globe,
+  HelpCircle,
+  Leaf,
+  Drumstick,
 } from 'lucide-react';
 import { PartyFormInput, MealType, VenueType } from '../types';
-import { PARTY_PRESETS, DIETARY_OPTIONS, CYMBALMART_STORES, PartyPreset } from '../data/presets';
+import { DIETARY_OPTIONS, PartyPreset, getPresetsForCountry } from '../data/presets';
+import { SUPPORTED_COUNTRIES, CountryConfig, getCountryConfig, detectUserCountry } from '../data/countries';
 import { formatCurrency } from '../utils/calculator';
+import { CountrySelectorModal } from './CountrySelectorModal';
 
 interface PartySetupWizardProps {
   onGeneratePlan: (form: PartyFormInput) => Promise<void>;
   isLoading: boolean;
   onClose?: () => void;
   initialValues?: PartyFormInput | null;
+  currentCountryCode?: string;
+  onCountryChange?: (country: CountryConfig) => void;
 }
 
-const DEFAULT_FORM: PartyFormInput = {
-  title: 'Summer Backyard Cookout',
-  theme: 'Classic Americana BBQ',
-  eventType: 'Cookout / BBQ',
-  guestBreakdown: { adults: 14, teens: 4, kids: 6 },
-  durationHours: 4,
-  mealType: 'full_meal',
-  venue: 'backyard_outdoor',
-  dietaryRestrictions: ['Vegetarian Option', 'Gluten-Free Option'],
-  customDietaryNotes: '4 vegetarian guests (need veggie patties & grilled corn)',
-  targetBudget: 280,
-  preferredStores: ['CymbalMart Supercenter #1042 - Sunnyvale (El Camino Real)'],
-  customNotes: 'Outdoor backyard event: need party ice bags, cooler essentials, disposable cutlery, and bug spray.',
-  fulfillmentPreference: 'curbside_pickup',
+const getDefaultFormForCountry = (country: CountryConfig): PartyFormInput => {
+  const presets = getPresetsForCountry(country.code);
+  if (presets.length > 0) {
+    return { ...presets[0].config };
+  }
+
+  return {
+    title: `${country.name} Celebration`,
+    theme: 'Warm Festive Gathering',
+    eventType: country.popularOccasions[0] || 'Celebration',
+    countryCode: country.code,
+    currencyCode: country.currencyCode,
+    guestBreakdown: { adults: 14, teens: 4, kids: 6 },
+    guestDietaryBreakdown: { pureVeg: 12, nonVeg: 12, vegan: 0, jain: 0 },
+    durationHours: 4,
+    mealType: 'full_meal',
+    venue: 'indoor_home',
+    dietaryRestrictions: ['Vegetarian Option'],
+    customDietaryNotes: '',
+    targetBudget: country.defaultBudget,
+    preferredStores: [country.defaultStores[0]?.name || 'CymbalMart Supercenter'],
+    customNotes: '',
+    fulfillmentPreference: 'express_delivery',
+    metricUnits: country.metricUnits,
+    regionalPreference: country.code === 'IN' ? 'all_indian' : undefined,
+  };
 };
 
 export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
@@ -52,9 +71,49 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
   isLoading,
   onClose,
   initialValues,
+  currentCountryCode,
+  onCountryChange,
 }) => {
-  const [formData, setFormData] = useState<PartyFormInput>(initialValues || DEFAULT_FORM);
-  const [selectedPresetId, setSelectedPresetId] = useState<string | null>('cymbal-backyard-bbq');
+  const defaultCountry = currentCountryCode
+    ? getCountryConfig(currentCountryCode)
+    : detectUserCountry();
+
+  const [activeCountry, setActiveCountry] = useState<CountryConfig>(
+    initialValues?.countryCode
+      ? getCountryConfig(initialValues.countryCode)
+      : defaultCountry
+  );
+
+  const [formData, setFormData] = useState<PartyFormInput>(() => {
+    if (initialValues) return initialValues;
+    return getDefaultFormForCountry(defaultCountry);
+  });
+
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(() => {
+    const presets = getPresetsForCountry(activeCountry.code);
+    return presets[0]?.id || null;
+  });
+
+  const [isCountryModalOpen, setIsCountryModalOpen] = useState(false);
+
+  // Country presets
+  const availablePresets = getPresetsForCountry(activeCountry.code);
+
+  const handleSelectCountry = (country: CountryConfig) => {
+    setActiveCountry(country);
+    if (onCountryChange) {
+      onCountryChange(country);
+    }
+    const newForm = getDefaultFormForCountry(country);
+    setFormData(newForm);
+    const presets = getPresetsForCountry(country.code);
+    setSelectedPresetId(presets[0]?.id || null);
+  };
+
+  const handleApplyPreset = (preset: PartyPreset) => {
+    setSelectedPresetId(preset.id);
+    setFormData({ ...preset.config });
+  };
 
   const totalGuests =
     (Number(formData.guestBreakdown.adults) || 0) +
@@ -63,13 +122,10 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
 
   // Live catering formula estimates
   const estimatedDrinks = Math.round(totalGuests * formData.durationHours * 1.25);
-  const estimatedIceLbs = Math.max(10, Math.round(totalGuests * (formData.venue === 'backyard_outdoor' ? 2 : 1.5)));
+  const estimatedIceAmount = activeCountry.metricUnits
+    ? `${Math.max(5, Math.round(totalGuests * (formData.venue === 'backyard_outdoor' ? 1.0 : 0.75)))} kg`
+    : `${Math.max(10, Math.round(totalGuests * (formData.venue === 'backyard_outdoor' ? 2 : 1.5)))} lbs`;
   const costPerGuest = totalGuests > 0 ? formData.targetBudget / totalGuests : 0;
-
-  const handleApplyPreset = (preset: PartyPreset) => {
-    setSelectedPresetId(preset.id);
-    setFormData({ ...preset.config });
-  };
 
   const handleDietaryToggle = (item: string) => {
     const exists = formData.dietaryRestrictions.includes(item);
@@ -88,7 +144,12 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await onGeneratePlan(formData);
+    await onGeneratePlan({
+      ...formData,
+      countryCode: activeCountry.code,
+      currencyCode: activeCountry.currencyCode,
+      metricUnits: activeCountry.metricUnits,
+    });
   };
 
   const getPresetIcon = (iconName: string) => {
@@ -103,9 +164,18 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
         return <Coins className="w-4 h-4 text-emerald-500" />;
       case 'Tv':
         return <Tv className="w-4 h-4 text-blue-500" />;
+      case 'Utensils':
+        return <Utensils className="w-4 h-4 text-orange-500" />;
       default:
         return <Sparkles className="w-4 h-4 text-amber-500" />;
     }
+  };
+
+  const dietaryBreakdown = formData.guestDietaryBreakdown || {
+    pureVeg: Math.round(totalGuests * 0.6),
+    nonVeg: Math.round(totalGuests * 0.4),
+    vegan: 0,
+    jain: 0,
   };
 
   return (
@@ -120,20 +190,44 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
           CymbalMart AI Event Shopping Planner
         </h1>
         <p className="mt-1 text-xs sm:text-sm text-zinc-600 max-w-xl mx-auto">
-          Convert your party intent, guest count, and budget into a curated, aisle-organized CymbalMart grocery & supply list.
+          Convert your party intent, guest count, dietary preferences, and budget into a curated, aisle-organized CymbalMart grocery & supply list.
         </p>
+
+        {/* Prominent Country / Region Selector Banner */}
+        <div className="mt-4 inline-flex items-center space-x-2.5 p-1.5 sm:px-3 sm:py-1.5 rounded-2xl bg-white border border-zinc-200/90 shadow-2xs">
+          <span className="text-xs font-semibold text-zinc-500 flex items-center space-x-1 pl-1">
+            <Globe className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Country / Market:</span>
+          </span>
+          <button
+            type="button"
+            id="wizard-country-selector-btn"
+            onClick={() => setIsCountryModalOpen(true)}
+            className="flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200 text-emerald-950 font-bold text-xs transition-colors cursor-pointer"
+          >
+            <span className="text-base">{activeCountry.flag}</span>
+            <span>{activeCountry.name}</span>
+            <span className="text-emerald-700 font-semibold">({activeCountry.currencyCode} {activeCountry.currencySymbol})</span>
+            <span className="text-[10px] text-zinc-500 bg-white px-1.5 py-0.5 rounded-md border border-emerald-200/60 ml-1">
+              Change
+            </span>
+          </button>
+        </div>
       </div>
 
-      {/* 1-Click Curated CymbalMart Event Bundles */}
+      {/* 1-Click Curated CymbalMart Event Bundles for Country */}
       <div className="mb-6">
         <div className="flex items-center justify-between mb-2.5">
           <label className="text-xs font-bold uppercase tracking-wider text-zinc-500 flex items-center space-x-1.5">
             <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            <span>Curated CymbalMart Event Presets (1-Click Load)</span>
+            <span>Curated {activeCountry.name} Event Presets (1-Click Load)</span>
           </label>
+          <span className="text-[11px] text-zinc-500">
+            {availablePresets.length} curated templates
+          </span>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          {PARTY_PRESETS.map((preset) => {
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          {availablePresets.map((preset) => {
             const isSelected = selectedPresetId === preset.id;
             return (
               <button
@@ -141,20 +235,23 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
                 type="button"
                 id={`preset-btn-${preset.id}`}
                 onClick={() => handleApplyPreset(preset)}
-                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all relative cursor-pointer ${
+                className={`flex flex-col items-start p-3 rounded-xl border text-left transition-all relative cursor-pointer ${
                   isSelected
                     ? 'border-emerald-600 bg-emerald-50/70 shadow-2xs ring-2 ring-emerald-500/20'
                     : 'border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50'
                 }`}
               >
-                <div className="flex items-center justify-between w-full mb-1">
+                <div className="flex items-center justify-between w-full mb-1.5">
                   <div className="p-1 rounded-lg bg-zinc-100">{getPresetIcon(preset.icon)}</div>
-                  <span className="text-[9px] font-bold px-1.5 py-0.2 rounded-md bg-zinc-100 text-zinc-600">
+                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700">
                     {preset.badge}
                   </span>
                 </div>
                 <div className="font-bold text-xs text-zinc-900 line-clamp-1">{preset.name}</div>
-                <div className="text-[10px] text-zinc-500 line-clamp-2 mt-0.5 leading-tight">{preset.tagline}</div>
+                <div className="text-[11px] text-zinc-600 line-clamp-2 mt-0.5 leading-tight">{preset.tagline}</div>
+                <div className="mt-2 text-[10px] font-semibold text-emerald-800">
+                  Target: {activeCountry.currencySymbol}{preset.config.targetBudget.toLocaleString()} · ~{preset.config.guestBreakdown.adults + preset.config.guestBreakdown.teens + preset.config.guestBreakdown.kids} guests
+                </div>
               </button>
             );
           })}
@@ -175,7 +272,7 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
               required
               value={formData.title}
               onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-              placeholder="e.g. Maya's 30th Birthday Fiesta"
+              placeholder={`e.g. ${activeCountry.popularOccasions[0] || 'Birthday Party'}`}
               className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 text-xs sm:text-sm font-semibold text-zinc-900 transition-colors"
             />
           </div>
@@ -190,11 +287,46 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
               required
               value={formData.theme}
               onChange={(e) => setFormData({ ...formData, theme: e.target.value })}
-              placeholder="e.g. Classic Americana BBQ, Coastal Cantina, Retro 80s"
+              placeholder={activeCountry.code === 'IN' ? 'e.g. Royal Diwali Milan, Bollywood Beats, Street Food Carnival' : 'e.g. Classic Cookout, Cantina Taco Bar, Retro 80s'}
               className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 text-xs sm:text-sm font-semibold text-zinc-900 transition-colors"
             />
           </div>
         </div>
+
+        {/* Regional Cuisine Selection (If India or regional options exist) */}
+        {activeCountry.regionalFoodOptions && activeCountry.regionalFoodOptions.length > 0 && (
+          <div className="p-4 rounded-xl bg-amber-50/60 border border-amber-200">
+            <label className="block text-xs font-bold text-amber-950 uppercase tracking-wider mb-2 flex items-center justify-between">
+              <span className="flex items-center space-x-1.5">
+                <Utensils className="w-3.5 h-3.5 text-amber-600" />
+                <span>Regional Culinary Palette / Menu Style</span>
+              </span>
+              <span className="text-[11px] font-normal text-amber-800">
+                AI customizes authentic dishes & spice blends
+              </span>
+            </label>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+              {activeCountry.regionalFoodOptions.map((opt) => {
+                const isSelected = formData.regionalPreference === opt.id || (!formData.regionalPreference && opt.id === 'all_indian');
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setFormData({ ...formData, regionalPreference: opt.id })}
+                    className={`p-2.5 rounded-lg border text-left text-xs transition-all cursor-pointer ${
+                      isSelected
+                        ? 'border-amber-500 bg-white font-bold text-amber-950 shadow-2xs ring-2 ring-amber-400/30'
+                        : 'border-amber-200/80 bg-amber-50/50 hover:bg-white text-zinc-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-xs">{opt.label}</div>
+                    <div className="text-[10px] text-zinc-500 mt-0.5 line-clamp-1">{opt.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Section 2: Guest Count & Demographic Breakdown */}
         <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-200">
@@ -215,7 +347,7 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
             <div className="bg-white p-3 rounded-lg border border-zinc-200 flex items-center justify-between">
               <div>
                 <span className="text-xs font-bold text-zinc-800 block">Adults (21+)</span>
-                <span className="text-[10px] text-zinc-500">Full meals & cocktail portions</span>
+                <span className="text-[10px] text-zinc-500">Full portions & beverage servings</span>
               </div>
               <div className="flex items-center space-x-2">
                 <button
@@ -260,7 +392,7 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
             <div className="bg-white p-3 rounded-lg border border-zinc-200 flex items-center justify-between">
               <div>
                 <span className="text-xs font-bold text-zinc-800 block">Teens (13-20)</span>
-                <span className="text-[10px] text-zinc-500">Hearty snacks & seltzers</span>
+                <span className="text-[10px] text-zinc-500">Hearty snacks, chai & mocktails</span>
               </div>
               <div className="flex items-center space-x-2">
                 <button
@@ -305,7 +437,7 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
             <div className="bg-white p-3 rounded-lg border border-zinc-200 flex items-center justify-between">
               <div>
                 <span className="text-xs font-bold text-zinc-800 block">Kids (12 & under)</span>
-                <span className="text-[10px] text-zinc-500">Juice boxes & mini portions</span>
+                <span className="text-[10px] text-zinc-500">Juice tetra packs & mini snacks</span>
               </div>
               <div className="flex items-center space-x-2">
                 <button
@@ -343,6 +475,120 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
                 >
                   +
                 </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Vegetarian / Non-Veg Split Slider or Inputs */}
+          <div className="mt-4 pt-3 border-t border-zinc-200">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-zinc-700 uppercase tracking-wider flex items-center space-x-1.5">
+                <Leaf className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Vegetarian / Non-Vegetarian Split</span>
+              </span>
+              <span className="text-[11px] font-semibold text-emerald-800">
+                {dietaryBreakdown.pureVeg || 0} Pure Veg · {dietaryBreakdown.nonVeg || 0} Non-Veg
+                {dietaryBreakdown.jain ? ` · ${dietaryBreakdown.jain} Jain` : ''}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div className="bg-emerald-50/70 p-2.5 rounded-lg border border-emerald-200 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-emerald-950 block">Pure Veg</span>
+                  <span className="text-[10px] text-emerald-700">Paneer & Veg mains</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  max={totalGuests}
+                  value={dietaryBreakdown.pureVeg || 0}
+                  onChange={(e) => {
+                    const val = Number(e.target.value) || 0;
+                    setFormData({
+                      ...formData,
+                      guestDietaryBreakdown: {
+                        ...dietaryBreakdown,
+                        pureVeg: val,
+                        nonVeg: Math.max(0, totalGuests - val),
+                      },
+                    });
+                  }}
+                  className="w-12 px-2 py-1 rounded-md bg-white border border-emerald-300 text-center font-bold text-xs text-zinc-900"
+                />
+              </div>
+
+              <div className="bg-amber-50/70 p-2.5 rounded-lg border border-amber-200 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-amber-950 block">Non-Veg</span>
+                  <span className="text-[10px] text-amber-700">Chicken/Mutton/Fish</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  max={totalGuests}
+                  value={dietaryBreakdown.nonVeg || 0}
+                  onChange={(e) => {
+                    const val = Number(e.target.value) || 0;
+                    setFormData({
+                      ...formData,
+                      guestDietaryBreakdown: {
+                        ...dietaryBreakdown,
+                        nonVeg: val,
+                        pureVeg: Math.max(0, totalGuests - val),
+                      },
+                    });
+                  }}
+                  className="w-12 px-2 py-1 rounded-md bg-white border border-amber-300 text-center font-bold text-xs text-zinc-900"
+                />
+              </div>
+
+              <div className="bg-purple-50/70 p-2.5 rounded-lg border border-purple-200 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-purple-950 block">Jain Veg</span>
+                  <span className="text-[10px] text-purple-700">No root veg/onion</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  max={totalGuests}
+                  value={dietaryBreakdown.jain || 0}
+                  onChange={(e) => {
+                    const val = Number(e.target.value) || 0;
+                    setFormData({
+                      ...formData,
+                      guestDietaryBreakdown: {
+                        ...dietaryBreakdown,
+                        jain: val,
+                      },
+                    });
+                  }}
+                  className="w-12 px-2 py-1 rounded-md bg-white border border-purple-300 text-center font-bold text-xs text-zinc-900"
+                />
+              </div>
+
+              <div className="bg-sky-50/70 p-2.5 rounded-lg border border-sky-200 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-sky-950 block">Vegan</span>
+                  <span className="text-[10px] text-sky-700">Dairy & egg-free</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  max={totalGuests}
+                  value={dietaryBreakdown.vegan || 0}
+                  onChange={(e) => {
+                    const val = Number(e.target.value) || 0;
+                    setFormData({
+                      ...formData,
+                      guestDietaryBreakdown: {
+                        ...dietaryBreakdown,
+                        vegan: val,
+                      },
+                    });
+                  }}
+                  className="w-12 px-2 py-1 rounded-md bg-white border border-sky-300 text-center font-bold text-xs text-zinc-900"
+                />
               </div>
             </div>
           </div>
@@ -385,10 +631,10 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
               onChange={(e) => setFormData({ ...formData, mealType: e.target.value as MealType })}
               className="w-full px-3 py-2.5 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white text-xs font-semibold text-zinc-900"
             >
-              <option value="full_meal">Full Meal / Hot Buffet (Main + 2 Sides)</option>
-              <option value="heavy_appetizers">Heavy Appetizers & Grazing Platters</option>
-              <option value="snacks_desserts">Light Snacks, Finger Foods & Desserts</option>
-              <option value="brunch">Brunch Spread (Bagels, Pastries & Fruit)</option>
+              <option value="full_meal">Full Meal / Hot Buffet (Main + 2 Sides + Dessert)</option>
+              <option value="heavy_appetizers">Heavy Appetizers, Chaat & Grazing Platters</option>
+              <option value="snacks_desserts">Light Snacks, Chai & Mithai/Desserts</option>
+              <option value="brunch">Brunch Spread (Tiffin, Pastries & Fruit)</option>
               <option value="drinks_only">Beverages & Light Bites Only</option>
             </select>
           </div>
@@ -406,8 +652,8 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
               className="w-full px-3 py-2.5 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white text-xs font-semibold text-zinc-900"
             >
               <option value="indoor_home">Indoor Home / Apartment</option>
-              <option value="backyard_outdoor">Backyard / Patio (+Extra Ice & Torches)</option>
-              <option value="rented_venue">Rented Event Hall / Club House</option>
+              <option value="backyard_outdoor">Backyard / Patio / Terrace (+Extra Ice & Torches)</option>
+              <option value="rented_venue">Rented Event Hall / Club House / Banquet</option>
               <option value="park_picnic">Public Park / Picnic Shelter</option>
             </select>
           </div>
@@ -419,40 +665,42 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
           <div>
             <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5 flex items-center justify-between">
               <span className="flex items-center space-x-1">
-                <DollarSign className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Target Budget ($ USD)</span>
+                <Coins className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Target Budget ({activeCountry.currencyCode} {activeCountry.currencySymbol})</span>
               </span>
               <span className="text-xs text-zinc-500 font-semibold">
-                ~{formatCurrency(costPerGuest)} / guest
+                ~{formatCurrency(costPerGuest, activeCountry.currencyCode)} / guest
               </span>
             </label>
             <div className="flex items-center space-x-2">
               <div className="relative flex-1">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-zinc-400 font-bold">$</span>
+                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-zinc-400 font-bold">
+                  {activeCountry.currencySymbol}
+                </span>
                 <input
                   type="number"
                   id="input-target-budget"
-                  min="30"
-                  max="5000"
-                  step="10"
+                  min={activeCountry.budgetStep}
+                  max={activeCountry.defaultBudget * 10}
+                  step={activeCountry.budgetStep}
                   value={formData.targetBudget}
                   onChange={(e) => setFormData({ ...formData, targetBudget: Number(e.target.value) || 0 })}
                   className="w-full pl-8 pr-3 py-2.5 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white focus:border-emerald-600 text-sm font-bold text-zinc-900"
                 />
               </div>
-              <div className="flex space-x-1">
-                {[175, 250, 350, 500].map((b) => (
+              <div className="flex space-x-1 overflow-x-auto">
+                {activeCountry.budgetPresets.map((b) => (
                   <button
                     key={b}
                     type="button"
                     onClick={() => setFormData({ ...formData, targetBudget: b })}
-                    className={`px-2.5 py-2 rounded-lg text-xs font-medium border cursor-pointer ${
+                    className={`px-2 py-2 rounded-lg text-xs font-medium border whitespace-nowrap cursor-pointer ${
                       formData.targetBudget === b
                         ? 'bg-emerald-50 text-emerald-800 border-emerald-300 font-bold'
                         : 'bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100'
                     }`}
                   >
-                    ${b}
+                    {activeCountry.currencySymbol}{b.toLocaleString()}
                   </button>
                 ))}
               </div>
@@ -463,14 +711,14 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
           <div>
             <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5 flex items-center space-x-1">
               <Store className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Select CymbalMart Location</span>
+              <span>Select {activeCountry.name} CymbalMart Hub</span>
             </label>
             <select
-              value={formData.preferredStores[0] || CYMBALMART_STORES[0].name}
+              value={formData.preferredStores[0] || activeCountry.defaultStores[0]?.name}
               onChange={(e) => setFormData({ ...formData, preferredStores: [e.target.value] })}
               className="w-full px-3 py-2.5 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white text-xs font-medium text-zinc-900"
             >
-              {CYMBALMART_STORES.map((s) => (
+              {activeCountry.defaultStores.map((s) => (
                 <option key={s.id} value={s.name}>
                   {s.name} ({s.distance})
                 </option>
@@ -487,16 +735,16 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             {[
               {
-                id: 'curbside_pickup',
-                title: 'Free Curbside Pickup',
-                desc: 'Ready in 2 hours, trunk loading',
-                icon: ShoppingBag,
-              },
-              {
                 id: 'express_delivery',
                 title: 'CymbalMart 2-Hr Delivery',
                 desc: 'Delivered directly to venue/home',
                 icon: Truck,
+              },
+              {
+                id: 'curbside_pickup',
+                title: 'Free Curbside Pickup',
+                desc: 'Ready in 2 hours, trunk loading',
+                icon: ShoppingBag,
               },
               {
                 id: 'in_store_walk',
@@ -561,7 +809,7 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
             type="text"
             value={formData.customDietaryNotes || ''}
             onChange={(e) => setFormData({ ...formData, customDietaryNotes: e.target.value })}
-            placeholder="Specific dietary notes (e.g. 1 guest has peanut allergy, need GF buns for 2 guests)..."
+            placeholder="Specific dietary notes (e.g. 4 pure vegetarians, separate sweets counter, peanut allergy warning)..."
             className="w-full px-3 py-2 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white text-xs text-zinc-800"
           />
         </div>
@@ -575,24 +823,24 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
             rows={2}
             value={formData.customNotes || ''}
             onChange={(e) => setFormData({ ...formData, customNotes: e.target.value })}
-            placeholder="e.g. We need a signature punch mocktail recipe, extra lawn torches for outdoors, and eco-friendly sugarcane plates..."
+            placeholder="e.g. Need authentic masala chai ingredients, areca nut eco-plates, extra party ice, and festive diya lights..."
             className="w-full px-3 py-2 rounded-xl border border-zinc-200 bg-zinc-50 focus:bg-white text-xs text-zinc-800"
           />
         </div>
 
         {/* Live Catering Estimation Preview Box */}
-        <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center space-x-2">
             <Info className="w-4 h-4 text-emerald-700 shrink-0" />
             <span className="font-semibold text-emerald-900">
-              Catering Golden Rule Estimates:
+              Catering Golden Rule Estimates ({activeCountry.name} Market):
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-emerald-800 text-[11px] font-medium">
             <span>🥤 <strong>~{estimatedDrinks}</strong> Total Drinks</span>
-            <span>🧊 <strong>~{estimatedIceLbs} lbs</strong> Party Ice</span>
+            <span>🧊 <strong>~{estimatedIceAmount}</strong> Party Ice</span>
             <span>🍽️ <strong>1.3x</strong> Tableware Buffer</span>
-            <span>💵 <strong>{formatCurrency(costPerGuest)}</strong>/Guest</span>
+            <span>💵 <strong>{formatCurrency(costPerGuest, activeCountry.currencyCode)}</strong>/Guest</span>
           </div>
         </div>
 
@@ -607,18 +855,26 @@ export const PartySetupWizard: React.FC<PartySetupWizardProps> = ({
             {isLoading ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                <span>Generating Curated CymbalMart Shopping List & Portions...</span>
+                <span>Generating Curated {activeCountry.name} Shopping List & Portions...</span>
               </>
             ) : (
               <>
                 <Sparkles className="w-5 h-5 text-amber-300" />
-                <span>Generate Curated CymbalMart Shopping List</span>
+                <span>Generate Curated {activeCountry.name} Shopping List</span>
                 <ChevronRight className="w-4 h-4 ml-1" />
               </>
             )}
           </button>
         </div>
       </form>
+
+      {/* Country Selector Modal */}
+      <CountrySelectorModal
+        isOpen={isCountryModalOpen}
+        onClose={() => setIsCountryModalOpen(false)}
+        selectedCountryCode={activeCountry.code}
+        onSelectCountry={handleSelectCountry}
+      />
     </div>
   );
 };

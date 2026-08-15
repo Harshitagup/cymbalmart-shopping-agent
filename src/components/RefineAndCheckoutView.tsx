@@ -19,6 +19,7 @@ import {
 import { PartyPlan, ShoppingItem, ChatMessage } from '../types';
 import { calculateBudgetMetrics, formatCurrency } from '../utils/calculator';
 import { CYMBALMART_STORES } from '../data/presets';
+import { getCountryConfig } from '../data/countries';
 
 interface RefineAndCheckoutViewProps {
   plan: PartyPlan;
@@ -44,16 +45,20 @@ export const RefineAndCheckoutView: React.FC<RefineAndCheckoutViewProps> = ({
   onBackToReviewList,
 }) => {
   const [chatInput, setChatInput] = useState('');
+  const countryConfig = getCountryConfig(plan.countryCode || 'IN');
+  const availableStores = countryConfig.defaultStores.length > 0 ? countryConfig.defaultStores : CYMBALMART_STORES;
+
   const [selectedFulfillment, setSelectedFulfillment] = useState<'curbside_pickup' | 'express_delivery' | 'in_store_walk'>(
     plan.fulfillmentType || 'curbside_pickup'
   );
   const [selectedStore, setSelectedStore] = useState<string>(
-    plan.storeLocation || CYMBALMART_STORES[0].name
+    plan.storeLocation || availableStores[0]?.name || 'CymbalMart Superstore'
   );
   const [timeSlot, setTimeSlot] = useState<string>('Tomorrow, 2:00 PM - 3:00 PM');
 
   const metrics = calculateBudgetMetrics(items, plan.targetBudget, plan.guestCount);
   const isOverBudget = metrics.isOverBudget;
+  const currencyCode = plan.currencyCode || countryConfig.currencyCode;
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,95 +68,92 @@ export const RefineAndCheckoutView: React.FC<RefineAndCheckoutViewProps> = ({
     await onSendMessage(text);
   };
 
-  const quickRefinePrompts = [
-    'Cut $25 from non-essential items to align with my budget',
-    'Make all appetizers 100% Gluten-Free and Nut-Free',
-    'Add 4 more adult guests and increase craft drinks and ice',
-    'Swap all national brands to Cymbal Choice Store Brands',
-    'Add ingredients for signature mocktail punch',
-  ];
-
   return (
-    <div id="refine-checkout-view" className="space-y-6">
-      {/* Top CUJ Banner */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-zinc-200 shadow-xs">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-                Task 3: Refine & Finalize Checkout
-              </span>
-              <span className="text-xs text-zinc-500 font-semibold">
-                Event: {plan.title}
-              </span>
-            </div>
-            <h2 className="text-xl sm:text-2xl font-extrabold text-zinc-900 tracking-tight mt-1">
-              Refine Constraints & Finalize CymbalMart Order
-            </h2>
+    <div id="refine-and-checkout-view" className="space-y-5">
+      {/* View Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 sm:p-5 rounded-2xl border border-zinc-200 shadow-xs">
+        <div>
+          <div className="flex items-center space-x-2 mb-1">
+            <span className="text-xs font-bold uppercase tracking-wider text-zinc-500">
+              Task 3: Refine & Checkout
+            </span>
+            <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200">
+              {countryConfig.flag} {countryConfig.name} Market
+            </span>
           </div>
-
-          <button
-            type="button"
-            onClick={onBackToReviewList}
-            className="text-xs font-semibold text-zinc-600 hover:text-zinc-900 px-3 py-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-50 transition-colors cursor-pointer self-start sm:self-center"
-          >
-            ← Back to Review List
-          </button>
+          <h2 className="text-xl sm:text-2xl font-extrabold text-zinc-900 tracking-tight">
+            AI Assistant Refinements & 1-Click Order
+          </h2>
+          <p className="text-xs sm:text-sm text-zinc-600 mt-0.5">
+            Chat with Gemini to fine-tune substitutions, review host prep timeline, and place your order.
+          </p>
         </div>
+
+        <button
+          type="button"
+          onClick={onBackToReviewList}
+          className="inline-flex items-center space-x-1 px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-xs font-semibold transition-colors cursor-pointer self-start sm:self-auto"
+        >
+          <span>← Back to Shopping List</span>
+        </button>
       </div>
 
-      {/* 2-Column Layout: Left (AI Co-Pilot & Constraints), Right (Run-of-Show & Fulfillment Checkout) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: AI Constraint Refiner */}
+      {/* Main Grid: Left = Chat & Logistics; Right = Cart & Checkout */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Left Column: Interactive Chat & Logistics Timeline */}
         <div className="lg:col-span-7 space-y-4">
-          <div className="bg-white p-5 rounded-2xl border border-zinc-200 shadow-xs">
-            <div className="flex items-center justify-between mb-3">
+          {/* AI Refinement Chat Console */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-zinc-200 shadow-xs flex flex-col h-[480px]">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-100 mb-3">
               <div className="flex items-center space-x-2">
-                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white shadow-2xs">
-                  <Sparkles className="w-4 h-4 text-amber-200" />
+                <div className="w-7 h-7 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-800 font-bold text-xs">
+                  <Sparkles className="w-4 h-4 text-emerald-700" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm text-zinc-900 flex items-center space-x-1.5">
-                    <span>CymbalMart Assistant</span>
-                    <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800">
-                      Co-Pilot
-                    </span>
+                  <h3 className="font-bold text-xs sm:text-sm text-zinc-900">
+                    CymbalMart AI Shopping Refinement Assistant
                   </h3>
-                  <p className="text-[11px] text-zinc-500">
-                    Ask to adjust dietary constraints, trim budget, swap to store brands, or recalculate portions
+                  <p className="text-[10px] text-zinc-500">
+                    Ask to cut budget by {countryConfig.currencySymbol}500, substitute items, or adjust for {countryConfig.name} tastes
                   </p>
                 </div>
+              </div>
+
+              <div className="flex items-center space-x-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>Active</span>
               </div>
             </div>
 
             {/* Quick Prompt Chips */}
-            <div className="mb-4">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 block mb-1.5">
-                Quick Constraint Adjustments:
-              </span>
-              <div className="flex flex-wrap gap-1.5">
-                {quickRefinePrompts.map((promptText, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    disabled={isChatLoading}
-                    onClick={() => onSendMessage(promptText)}
-                    className="text-[11px] font-medium px-2.5 py-1 rounded-lg bg-zinc-50 hover:bg-emerald-50 border border-zinc-200 hover:border-emerald-300 text-zinc-700 hover:text-emerald-900 transition-all text-left cursor-pointer disabled:opacity-50"
-                  >
-                    ✨ {promptText}
-                  </button>
-                ))}
-              </div>
+            <div className="flex items-center space-x-1.5 overflow-x-auto pb-2 mb-2 scrollbar-none">
+              {[
+                `Cut budget by ${countryConfig.currencySymbol}${countryConfig.budgetStep}`,
+                'Swap national brands to Cymbal Choice',
+                'Ensure enough pure vegetarian mains',
+                'Add extra party ice & chilled drinks',
+                'Suggest kid-friendly snacks',
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => onSendMessage(prompt)}
+                  disabled={isChatLoading}
+                  className="px-2.5 py-1 rounded-full bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-[11px] font-medium whitespace-nowrap border border-zinc-200 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {prompt}
+                </button>
+              ))}
             </div>
 
-            {/* Chat Conversation Thread */}
-            <div className="h-64 overflow-y-auto space-y-3 p-3 bg-zinc-50 rounded-xl border border-zinc-200/80 mb-3 text-xs">
+            {/* Messages Scroll Area */}
+            <div className="flex-1 overflow-y-auto space-y-3 pr-1 mb-3">
               {chatHistory.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center text-zinc-400 p-4">
-                  <Sparkles className="w-8 h-8 text-emerald-400 mb-2" />
-                  <p className="font-semibold text-zinc-700">Need last-minute adjustments?</p>
-                  <p className="text-[11px] text-zinc-500 max-w-xs mt-0.5">
-                    "Cut $20 from snacks", "Swap cheese to vegan alternatives", or "Recalculate drinks for 20 guests".
+                <div className="h-full flex flex-col items-center justify-center text-center p-4 text-zinc-400">
+                  <Sparkles className="w-8 h-8 text-zinc-300 mb-2" />
+                  <p className="text-xs font-semibold text-zinc-700">Need adjustments to your plan?</p>
+                  <p className="text-[11px] text-zinc-500 max-w-xs mt-1">
+                    Try asking: "Swap all sodas for healthy juices", "Trim budget under {countryConfig.currencySymbol}{plan.targetBudget}", or "Add gluten-free dessert".
                   </p>
                 </div>
               ) : (
@@ -161,20 +163,25 @@ export const RefineAndCheckoutView: React.FC<RefineAndCheckoutViewProps> = ({
                     className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
                   >
                     <div
-                      className={`max-w-[85%] p-3 rounded-2xl leading-relaxed ${
+                      className={`max-w-[85%] p-3 rounded-2xl text-xs leading-relaxed ${
                         msg.role === 'user'
-                          ? 'bg-emerald-700 text-white rounded-br-xs'
-                          : 'bg-white border border-zinc-200 text-zinc-800 rounded-bl-xs shadow-2xs'
+                          ? 'bg-zinc-900 text-white rounded-br-xs'
+                          : msg.role === 'system'
+                          ? 'bg-rose-50 text-rose-800 border border-rose-200'
+                          : 'bg-zinc-100 text-zinc-800 rounded-bl-xs'
                       }`}
                     >
                       <p>{msg.content}</p>
+
                       {msg.appliedActions && msg.appliedActions.length > 0 && (
-                        <div className="mt-2 pt-2 border-t border-emerald-100 text-[10px] space-y-1">
-                          <span className="font-bold text-emerald-800 block">Actions Applied:</span>
+                        <div className="mt-2 pt-2 border-t border-zinc-200/80 space-y-1">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 block">
+                            ✓ Cart Actions Applied by Gemini:
+                          </span>
                           {msg.appliedActions.map((act, i) => (
-                            <div key={i} className="flex items-center space-x-1 text-emerald-700">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                              <span>{act}</span>
+                            <div key={i} className="text-[11px] text-zinc-700 flex items-center space-x-1">
+                              <span>•</span>
+                              <span>{act.description}</span>
                             </div>
                           ))}
                         </div>
@@ -264,16 +271,16 @@ export const RefineAndCheckoutView: React.FC<RefineAndCheckoutViewProps> = ({
             <div className="mb-4">
               <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1 flex items-center space-x-1">
                 <Store className="w-3 h-3 text-emerald-600" />
-                <span>Pickup / Delivery Store</span>
+                <span>Pickup / Delivery Store ({countryConfig.name})</span>
               </label>
               <select
                 value={selectedStore}
                 onChange={(e) => setSelectedStore(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-zinc-200 bg-zinc-50 text-xs font-medium text-zinc-900"
               >
-                {CYMBALMART_STORES.map((s) => (
+                {availableStores.map((s) => (
                   <option key={s.id} value={s.name}>
-                    {s.name}
+                    {s.name} ({s.distance})
                   </option>
                 ))}
               </select>
@@ -296,7 +303,7 @@ export const RefineAndCheckoutView: React.FC<RefineAndCheckoutViewProps> = ({
                 {
                   id: 'express_delivery',
                   title: 'CymbalMart Express 2-Hr Delivery',
-                  badge: '$4.99 or Free with Club',
+                  badge: 'Express',
                   desc: 'Direct refrigerated delivery to venue',
                   icon: Truck,
                 },
@@ -364,37 +371,37 @@ export const RefineAndCheckoutView: React.FC<RefineAndCheckoutViewProps> = ({
             <div className="bg-zinc-50 p-3.5 rounded-xl border border-zinc-200 space-y-2 text-xs mb-4">
               <div className="flex justify-between text-zinc-600">
                 <span>Cart Subtotal ({metrics.totalItemsCount - metrics.pantryItemsCount} items)</span>
-                <span className="font-semibold text-zinc-900">{formatCurrency(metrics.totalEstimatedCost)}</span>
+                <span className="font-semibold text-zinc-900">{formatCurrency(metrics.totalEstimatedCost, currencyCode)}</span>
               </div>
 
               {metrics.cymbalBrandSavings > 0 && (
                 <div className="flex justify-between text-emerald-800 font-medium">
                   <span>Cymbal Choice Brand Savings</span>
-                  <span>-{formatCurrency(metrics.cymbalBrandSavings)}</span>
+                  <span>-{formatCurrency(metrics.cymbalBrandSavings, currencyCode)}</span>
                 </div>
               )}
 
               {metrics.alreadyOwnedSavings > 0 && (
                 <div className="flex justify-between text-amber-800 font-medium">
                   <span>Home Pantry Savings</span>
-                  <span>-${formatCurrency(metrics.alreadyOwnedSavings)}</span>
+                  <span>-{formatCurrency(metrics.alreadyOwnedSavings, currencyCode)}</span>
                 </div>
               )}
 
               <div className="flex justify-between text-zinc-600">
-                <span>Estimated Local Tax (7.25%)</span>
-                <span>{formatCurrency(metrics.totalEstimatedCost * 0.0725)}</span>
+                <span>Estimated Local Tax (5%)</span>
+                <span>{formatCurrency(metrics.totalEstimatedCost * 0.05, currencyCode)}</span>
               </div>
 
               <div className="pt-2 border-t border-zinc-200 flex justify-between items-baseline">
                 <div>
                   <span className="font-extrabold text-zinc-900 text-sm block">Final Cart Total</span>
                   <span className="text-[10px] text-zinc-500">
-                    Target Budget: {formatCurrency(plan.targetBudget)}
+                    Target Budget: {formatCurrency(plan.targetBudget, currencyCode)}
                   </span>
                 </div>
                 <span className="font-extrabold text-lg text-zinc-900">
-                  {formatCurrency(metrics.totalEstimatedCost * 1.0725)}
+                  {formatCurrency(metrics.totalEstimatedCost * 1.05, currencyCode)}
                 </span>
               </div>
             </div>

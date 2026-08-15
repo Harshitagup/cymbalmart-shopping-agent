@@ -10,15 +10,31 @@ import { AddItemModal } from './components/AddItemModal';
 import { ExportModal } from './components/ExportModal';
 import { SavedPlansModal } from './components/SavedPlansModal';
 import { CymbalMartAssistant } from './components/CymbalMartAssistant';
+import { CountrySelectorModal } from './components/CountrySelectorModal';
+import { CountryChangeConfirmModal } from './components/CountryChangeConfirmModal';
 import { PartyPlan, PartyFormInput, ShoppingItem, PrepTask, ChatMessage, CUJStep } from './types';
-import { calculateBudgetMetrics } from './utils/calculator';
-import { PARTY_PRESETS } from './data/presets';
+import { calculateBudgetMetrics, convertPlanPricesToCountry } from './utils/calculator';
+import { PARTY_PRESETS, getPresetsForCountry } from './data/presets';
+import { SUPPORTED_COUNTRIES, CountryConfig, getCountryConfig, detectUserCountry } from './data/countries';
 import confetti from 'canvas-confetti';
 
 const STORAGE_KEY_CURRENT = 'cymbalmart_active_party_plan_v3';
 const STORAGE_KEY_SAVED = 'cymbalmart_saved_party_plans_v3';
+const STORAGE_KEY_COUNTRY = 'cymbalmart_country_preference_v3';
 
 export default function App() {
+  const [selectedCountry, setSelectedCountry] = useState<CountryConfig>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_COUNTRY);
+      if (stored) {
+        return getCountryConfig(stored);
+      }
+    } catch (e) {
+      console.warn('Could not read stored country:', e);
+    }
+    return detectUserCountry();
+  });
+
   const [currentPlan, setCurrentPlan] = useState<PartyPlan | null>(null);
   const [savedPlans, setSavedPlans] = useState<PartyPlan[]>([]);
   const [cujStep, setCujStep] = useState<CUJStep>('review');
@@ -26,19 +42,23 @@ export default function App() {
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isSavedModalOpen, setIsSavedModalOpen] = useState(false);
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
+  const [isCountryModalOpen, setIsCountryModalOpen] = useState(false);
+  const [isCountryConfirmOpen, setIsCountryConfirmOpen] = useState(false);
+  const [pendingTargetCountry, setPendingTargetCountry] = useState<CountryConfig | null>(null);
+
   const [orderFulfillment, setOrderFulfillment] = useState<{
     fulfillmentType: 'curbside_pickup' | 'express_delivery' | 'in_store_walk';
     storeLocation: string;
   }>({
-    fulfillmentType: 'curbside_pickup',
-    storeLocation: 'CymbalMart Supercenter #1042 - Sunnyvale',
+    fulfillmentType: 'express_delivery',
+    storeLocation: 'CymbalMart Hypermarket - Bengaluru',
   });
   const [isLoading, setIsLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
 
-  // Initialize from LocalStorage or generate default CymbalMart plan
+  // Initialize from LocalStorage or generate initial localized CymbalMart plan
   useEffect(() => {
     try {
       const storedCurrent = localStorage.getItem(STORAGE_KEY_CURRENT);
@@ -49,15 +69,18 @@ export default function App() {
       }
 
       if (storedCurrent) {
-        const plan = JSON.parse(storedCurrent);
+        const plan: PartyPlan = JSON.parse(storedCurrent);
         setCurrentPlan(plan);
+        if (plan.countryCode) {
+          setSelectedCountry(getCountryConfig(plan.countryCode));
+        }
         setCujStep('review');
       } else {
-        generateInitialPlan();
+        generateInitialPlan(selectedCountry);
       }
     } catch (e) {
       console.error('Error loading stored plan:', e);
-      generateInitialPlan();
+      generateInitialPlan(selectedCountry);
     }
   }, []);
 
@@ -78,10 +101,11 @@ export default function App() {
     });
   };
 
-  const generateInitialPlan = async () => {
+  const generateInitialPlan = async (country: CountryConfig) => {
     setIsLoading(true);
     try {
-      const preset = PARTY_PRESETS[0].config;
+      const countryPresets = getPresetsForCountry(country.code);
+      const preset = countryPresets[0]?.config || PARTY_PRESETS[0].config;
       const res = await fetch('/api/party/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -115,6 +139,8 @@ export default function App() {
 
       const plan: PartyPlan = await res.json();
       updateCurrentPlan(plan);
+      setSelectedCountry(getCountryConfig(plan.countryCode || formData.countryCode || 'IN'));
+      localStorage.setItem(STORAGE_KEY_COUNTRY, plan.countryCode || 'IN');
       setCujStep('review');
       setChatHistory([]);
 
@@ -128,6 +154,40 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Country change initiation
+  const handleSelectCountryFromModal = (country: CountryConfig) => {
+    if (currentPlan && currentPlan.items.length > 0 && currentPlan.countryCode !== country.code) {
+      setPendingTargetCountry(country);
+      setIsCountryConfirmOpen(true);
+    } else {
+      setSelectedCountry(country);
+      localStorage.setItem(STORAGE_KEY_COUNTRY, country.code);
+      if (!currentPlan) {
+        generateInitialPlan(country);
+      }
+    }
+  };
+
+  // Country change confirm: Convert current plan prices & units
+  const handleConfirmCountryConversion = (targetCountry: CountryConfig) => {
+    if (!currentPlan) return;
+    const convertedPlan = convertPlanPricesToCountry(currentPlan, targetCountry.code);
+    setSelectedCountry(targetCountry);
+    localStorage.setItem(STORAGE_KEY_COUNTRY, targetCountry.code);
+    updateCurrentPlan(convertedPlan);
+    setIsCountryConfirmOpen(false);
+    setPendingTargetCountry(null);
+  };
+
+  // Country change confirm: Generate fresh plan for target country
+  const handleStartNewPlanForCountry = async (targetCountry: CountryConfig) => {
+    setSelectedCountry(targetCountry);
+    localStorage.setItem(STORAGE_KEY_COUNTRY, targetCountry.code);
+    setIsCountryConfirmOpen(false);
+    setPendingTargetCountry(null);
+    await generateInitialPlan(targetCountry);
   };
 
   // Chat message sending to Gemini
@@ -155,7 +215,7 @@ export default function App() {
       });
 
       if (!res.ok) {
-        throw new Error('Failed to communicate with AI Co-Pilot');
+        throw new Error('Failed to communicate with AI Assistant');
       }
 
       const data = await res.json();
@@ -243,7 +303,7 @@ export default function App() {
       if (nextSaved.length > 0) {
         updateCurrentPlan(nextSaved[0]);
       } else {
-        generateInitialPlan();
+        generateInitialPlan(selectedCountry);
       }
     }
   };
@@ -274,11 +334,12 @@ export default function App() {
         onOpenNewWizard={() => setCujStep('define')}
         onOpenSavedPlans={() => setIsSavedModalOpen(true)}
         onOpenExport={() => setIsExportOpen(true)}
-        onToggleAssistant={() => setIsAssistantOpen((prev) => !prev)}
         currentStep={cujStep}
         onSelectStep={(step) => setCujStep(step)}
         totalCost={metrics.totalEstimatedCost}
-        targetBudget={currentPlan?.targetBudget || 250}
+        targetBudget={currentPlan?.targetBudget || selectedCountry.defaultBudget}
+        countryCode={currentPlan?.countryCode || selectedCountry.code}
+        onOpenCountryModal={() => setIsCountryModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -289,7 +350,7 @@ export default function App() {
           onSelectStep={(step) => setCujStep(step)}
           hasPlan={Boolean(currentPlan)}
           totalCost={metrics.totalEstimatedCost}
-          targetBudget={currentPlan?.targetBudget || 250}
+          targetBudget={currentPlan?.targetBudget || selectedCountry.defaultBudget}
         />
 
         {/* View Routing Based on CUJ Step */}
@@ -297,20 +358,31 @@ export default function App() {
           <PartySetupWizard
             onGeneratePlan={handleGenerateNewPlan}
             isLoading={isLoading}
+            currentCountryCode={selectedCountry.code}
+            onCountryChange={(country) => {
+              setSelectedCountry(country);
+              localStorage.setItem(STORAGE_KEY_COUNTRY, country.code);
+            }}
             initialValues={
               currentPlan
                 ? {
                     title: currentPlan.title,
                     theme: currentPlan.theme,
                     eventType: currentPlan.eventType,
+                    countryCode: currentPlan.countryCode || selectedCountry.code,
+                    currencyCode: currentPlan.currencyCode || selectedCountry.currencyCode,
+                    regionalPreference: currentPlan.regionalPreference,
                     guestBreakdown: currentPlan.guestBreakdown,
+                    guestDietaryBreakdown: currentPlan.guestDietaryBreakdown,
                     durationHours: currentPlan.durationHours,
                     mealType: currentPlan.mealType,
                     venue: currentPlan.venue,
                     dietaryRestrictions: currentPlan.dietaryRestrictions,
+                    customDietaryNotes: currentPlan.customDietaryNotes,
                     targetBudget: currentPlan.targetBudget,
-                    preferredStores: [currentPlan.storeLocation || 'CymbalMart Supercenter #1042 - Sunnyvale'],
+                    preferredStores: [currentPlan.storeLocation || selectedCountry.defaultStores[0]?.name || 'CymbalMart Supercenter'],
                     fulfillmentPreference: currentPlan.fulfillmentType || 'curbside_pickup',
+                    metricUnits: currentPlan.metricUnits ?? selectedCountry.metricUnits,
                   }
                 : null
             }
@@ -355,6 +427,8 @@ export default function App() {
           <div className="flex items-center space-x-2">
             <span className="font-bold text-zinc-800">CymbalMart Smart Shopping Agent</span>
             <span>·</span>
+            <span>Global Market Localization ({selectedCountry.flag} {selectedCountry.name})</span>
+            <span>·</span>
             <span>Powered by Google Gemini AI</span>
           </div>
           <span className="text-zinc-400">
@@ -384,6 +458,9 @@ export default function App() {
         savedPlans={savedPlans}
         onSelectPlan={(plan) => {
           updateCurrentPlan(plan);
+          if (plan.countryCode) {
+            setSelectedCountry(getCountryConfig(plan.countryCode));
+          }
           setCujStep('review');
         }}
         onDeletePlan={handleDeletePlan}
@@ -401,6 +478,29 @@ export default function App() {
             setIsOrderModalOpen(false);
             setCujStep('define');
           }}
+        />
+      )}
+
+      {/* Country Selector Modal */}
+      <CountrySelectorModal
+        isOpen={isCountryModalOpen}
+        onClose={() => setIsCountryModalOpen(false)}
+        selectedCountryCode={currentPlan?.countryCode || selectedCountry.code}
+        onSelectCountry={handleSelectCountryFromModal}
+      />
+
+      {/* Country Change Confirmation Modal */}
+      {currentPlan && pendingTargetCountry && (
+        <CountryChangeConfirmModal
+          isOpen={isCountryConfirmOpen}
+          onClose={() => {
+            setIsCountryConfirmOpen(false);
+            setPendingTargetCountry(null);
+          }}
+          targetCountry={pendingTargetCountry}
+          currentPlan={currentPlan}
+          onConfirmConvert={handleConfirmCountryConversion}
+          onStartNewPlanForCountry={handleStartNewPlanForCountry}
         />
       )}
 
